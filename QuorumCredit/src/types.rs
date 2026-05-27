@@ -170,6 +170,8 @@ pub enum DataKey {
     LargeLoanRequest(Address), // borrower → LargeLoanRequestRecord
     VouchGraph(Address, Address), // (voucher, borrower) → depth u32
     LoanCategoryLoans(LoanCategory), // category → Vec<loan_id>
+    // #650 Loan Securitization: security_id (u64) → Vec<loan_id>
+    SecurityLoans(u64),
 }
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
@@ -255,6 +257,35 @@ pub struct TokenConfig {
     pub slash_bps: i128,
 }
 
+// ── #649 Loan Subordination ───────────────────────────────────────────────────
+
+/// Priority level for loan subordination (senior loans are repaid first on default).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoanPriority {
+    Senior,        // Repaid first in liquidation
+    Subordinated,  // Repaid after senior obligations
+}
+
+// ── #648 Milestone-Based Disbursement ────────────────────────────────────────
+
+/// Status of an individual disbursement milestone.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MilestoneStatus {
+    Pending,   // Not yet released
+    Released,  // Funds disbursed for this milestone
+}
+
+/// A single milestone in a tranche-based disbursement schedule.
+#[contracttype]
+#[derive(Clone)]
+pub struct Milestone {
+    pub amount: i128,              // tranche amount in stroops
+    pub release_timestamp: u64,   // earliest timestamp this tranche can be released
+    pub status: MilestoneStatus,
+}
+
 // ── Data Types ────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -274,6 +305,14 @@ pub struct LoanRecord {
     pub loan_purpose: soroban_sdk::String, // borrower-supplied purpose string
     pub loan_category: LoanCategory,       // category of the loan
     pub token_address: Address,            // token used for this loan
+    // #650 Loan Securitization: identifier when loan is bundled into a security
+    pub security_id: Option<u64>,
+    // #651 Loan Forbearance: timestamp until which payments are suspended
+    pub forbearance_end_date: Option<u64>,
+    // #649 Loan Subordination: repayment priority in multi-loan structures
+    pub priority_level: LoanPriority,
+    // #648 Milestone-Based Disbursement: tranche schedule (empty = single disbursement)
+    pub disbursement_schedule: Vec<Milestone>,
 }
 
 #[contracttype]

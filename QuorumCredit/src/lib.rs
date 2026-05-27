@@ -284,6 +284,59 @@ impl QuorumCreditContract {
         loan::get_loans_by_category(env, category)
     }
 
+    // #650 Loan Securitization
+    pub fn set_security_id(
+        env: Env,
+        admin_signers: Vec<Address>,
+        loan_id: u64,
+        security_id: u64,
+    ) -> Result<(), ContractError> {
+        loan::set_security_id(env, admin_signers, loan_id, security_id)
+    }
+
+    pub fn get_security_loans(env: Env, security_id: u64) -> Vec<u64> {
+        loan::get_security_loans(env, security_id)
+    }
+
+    // #651 Loan Forbearance
+    pub fn request_forbearance(
+        env: Env,
+        admin_signers: Vec<Address>,
+        borrower: Address,
+        end_timestamp: u64,
+    ) -> Result<(), ContractError> {
+        loan::request_forbearance(env, admin_signers, borrower, end_timestamp)
+    }
+
+    // #649 Loan Subordination
+    pub fn set_priority_level(
+        env: Env,
+        admin_signers: Vec<Address>,
+        loan_id: u64,
+        priority: LoanPriority,
+    ) -> Result<(), ContractError> {
+        loan::set_priority_level(env, admin_signers, loan_id, priority)
+    }
+
+    // #648 Milestone-Based Disbursement
+    pub fn add_disbursement_milestone(
+        env: Env,
+        admin_signers: Vec<Address>,
+        loan_id: u64,
+        amount: i128,
+        release_timestamp: u64,
+    ) -> Result<(), ContractError> {
+        loan::add_disbursement_milestone(env, admin_signers, loan_id, amount, release_timestamp)
+    }
+
+    pub fn release_milestone(
+        env: Env,
+        loan_id: u64,
+        milestone_index: u32,
+    ) -> Result<(), ContractError> {
+        loan::release_milestone(env, loan_id, milestone_index)
+    }
+
     // ── Admin Functions (require admin_threshold signatures) ──────────────────
 
     pub fn add_admin(env: Env, admin_signers: Vec<Address>, new_admin: Address) {

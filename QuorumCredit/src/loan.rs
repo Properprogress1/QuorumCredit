@@ -6,8 +6,8 @@ use crate::helpers::{
 };
 use crate::reputation::ReputationNftExternalClient;
 use crate::types::{
-    DataKey, LoanCategory, LoanRecord, LoanStatus, VouchRecord, DEFAULT_REFERRAL_BONUS_BPS,
-    MIN_VOUCH_AGE, CANCELLATION_WINDOW_SECONDS,
+    DataKey, LoanCategory, LoanPriority, LoanRecord, LoanStatus, Milestone, MilestoneStatus,
+    VouchRecord, DEFAULT_REFERRAL_BONUS_BPS, MIN_VOUCH_AGE, CANCELLATION_WINDOW_SECONDS,
 };
 use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
 
@@ -265,6 +265,10 @@ fn request_loan_internal(
             loan_purpose,
             loan_category: loan_category.clone(),
             token_address: token_addr.clone(),
+            security_id: None,
+            forbearance_end_date: None,
+            priority_level: crate::types::LoanPriority::Senior,
+            disbursement_schedule: Vec::new(&env),
         },
     );
 
@@ -492,6 +496,214 @@ pub fn get_loans_by_category(env: Env, category: LoanCategory) -> Vec<u64> {
         .unwrap_or(Vec::new(&env))
 }
 
+// ── #650 Loan Securitization ──────────────────────────────────────────────────
+
+/// Assign a security ID to a loan, bundling it into a tradeable security.
+/// Only admin can call this. Emits `loan/securitiz`.
+pub fn set_security_id(
+    env: Env,
+    admin_signers: Vec<Address>,
+    loan_id: u64,
+    security_id: u64,
+) -> Result<(), ContractError> {
+    crate::helpers::require_admin_approval(&env, &admin_signers);
+
+    let mut loan: LoanRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Loan(loan_id))
+        .ok_or(ContractError::NoActiveLoan)?;
+
+    loan.security_id = Some(security_id);
+    env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
+    extend_ttl(&env, &DataKey::Loan(loan_id));
+
+    // Track which loans belong to this security
+    let mut sec_loans: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::SecurityLoans(security_id))
+        .unwrap_or(Vec::new(&env));
+    if !sec_loans.iter().any(|id| id == loan_id) {
+        sec_loans.push_back(loan_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SecurityLoans(security_id), &sec_loans);
+        extend_ttl(&env, &DataKey::SecurityLoans(security_id));
+    }
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("securitiz")),
+        (loan_id, security_id),
+    );
+    Ok(())
+}
+
+/// Get all loan IDs bundled under a given security ID.
+pub fn get_security_loans(env: Env, security_id: u64) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SecurityLoans(security_id))
+        .unwrap_or(Vec::new(&env))
+}
+
+// ── #651 Loan Forbearance ─────────────────────────────────────────────────────
+
+/// Grant a forbearance period to a borrower, suspending payment obligations until
+/// `end_timestamp`. Only admin can call this. Emits `loan/forbear`.
+pub fn request_forbearance(
+    env: Env,
+    admin_signers: Vec<Address>,
+    borrower: Address,
+    end_timestamp: u64,
+) -> Result<(), ContractError> {
+    crate::helpers::require_admin_approval(&env, &admin_signers);
+
+    let loan_id: u64 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ActiveLoan(borrower.clone()))
+        .ok_or(ContractError::NoActiveLoan)?;
+
+    let mut loan: LoanRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Loan(loan_id))
+        .ok_or(ContractError::NoActiveLoan)?;
+
+    let now = env.ledger().timestamp();
+    assert!(end_timestamp > now, "forbearance end must be in the future");
+
+    loan.forbearance_end_date = Some(end_timestamp);
+    // Extend deadline by the forbearance duration
+    let extension = end_timestamp.saturating_sub(now);
+    loan.deadline = loan.deadline.saturating_add(extension);
+
+    env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
+    extend_ttl(&env, &DataKey::Loan(loan_id));
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("forbear")),
+        (borrower, loan_id, end_timestamp),
+    );
+    Ok(())
+}
+
+// ── #649 Loan Subordination ───────────────────────────────────────────────────
+
+/// Set the priority level (Senior / Subordinated) on an existing loan.
+/// Only admin can call this. Emits `loan/priority`.
+pub fn set_priority_level(
+    env: Env,
+    admin_signers: Vec<Address>,
+    loan_id: u64,
+    priority: LoanPriority,
+) -> Result<(), ContractError> {
+    crate::helpers::require_admin_approval(&env, &admin_signers);
+
+    let mut loan: LoanRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Loan(loan_id))
+        .ok_or(ContractError::NoActiveLoan)?;
+
+    loan.priority_level = priority.clone();
+    env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
+    extend_ttl(&env, &DataKey::Loan(loan_id));
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("priority")),
+        (loan_id, priority),
+    );
+    Ok(())
+}
+
+// ── #648 Milestone-Based Disbursement ────────────────────────────────────────
+
+/// Add a disbursement milestone to a loan. The milestone amount is NOT yet
+/// transferred — call `release_milestone` to disburse when the time arrives.
+/// Only admin can call this. Emits `loan/ms_add`.
+pub fn add_disbursement_milestone(
+    env: Env,
+    admin_signers: Vec<Address>,
+    loan_id: u64,
+    amount: i128,
+    release_timestamp: u64,
+) -> Result<(), ContractError> {
+    crate::helpers::require_admin_approval(&env, &admin_signers);
+    assert!(amount > 0, "milestone amount must be positive");
+
+    let mut loan: LoanRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Loan(loan_id))
+        .ok_or(ContractError::NoActiveLoan)?;
+
+    loan.disbursement_schedule.push_back(Milestone {
+        amount,
+        release_timestamp,
+        status: MilestoneStatus::Pending,
+    });
+
+    env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
+    extend_ttl(&env, &DataKey::Loan(loan_id));
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("ms_add")),
+        (loan_id, amount, release_timestamp),
+    );
+    Ok(())
+}
+
+/// Release a pending milestone tranche to the borrower.
+/// Anyone can call this once the milestone's `release_timestamp` has passed.
+/// Emits `loan/ms_rel`.
+pub fn release_milestone(
+    env: Env,
+    loan_id: u64,
+    milestone_index: u32,
+) -> Result<(), ContractError> {
+    require_not_paused(&env)?;
+
+    let mut loan: LoanRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Loan(loan_id))
+        .ok_or(ContractError::NoActiveLoan)?;
+
+    assert!(
+        milestone_index < loan.disbursement_schedule.len(),
+        "milestone index out of range"
+    );
+
+    let mut milestone = loan.disbursement_schedule.get(milestone_index).unwrap();
+    assert!(
+        milestone.status == MilestoneStatus::Pending,
+        "milestone already released"
+    );
+
+    let now = env.ledger().timestamp();
+    assert!(
+        now >= milestone.release_timestamp,
+        "milestone release time not reached"
+    );
+
+    milestone.status = MilestoneStatus::Released;
+    loan.disbursement_schedule.set(milestone_index, milestone.clone());
+
+    env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
+    extend_ttl(&env, &DataKey::Loan(loan_id));
+
+    let token = soroban_sdk::token::Client::new(&env, &loan.token_address);
+    token.transfer(&env.current_contract_address(), &loan.borrower, &milestone.amount);
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("ms_rel")),
+        (loan_id, milestone_index, milestone.amount),
+    );
+    Ok(())
+}
+
 // Task 2: Large Loan Multi-Signature - Require admin approval for large loans
 pub fn request_large_loan(
     env: Env,
@@ -663,6 +875,10 @@ pub fn execute_large_loan(env: Env, borrower: Address) -> Result<(), ContractErr
             loan_purpose: request.loan_purpose,
             loan_category: request.loan_category,
             token_address: request.token_address.clone(),
+            security_id: None,
+            forbearance_end_date: None,
+            priority_level: crate::types::LoanPriority::Senior,
+            disbursement_schedule: Vec::new(&env),
         },
     );
     extend_ttl(&env, &DataKey::Loan(loan_id));
