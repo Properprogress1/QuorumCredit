@@ -64,6 +64,7 @@ impl QuorumCreditContract {
                 min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
                 prepayment_penalty_bps: 0,
                 liquidity_mining_rate_bps: DEFAULT_LIQUIDITY_MINING_RATE_BPS,
+                partial_default_threshold_bps: 0,
             },
         );
 

@@ -107,7 +107,11 @@ pub enum LoanStatus {
     None,
     Active,
     Repaid,
+    /// #663: Borrower repaid some but less than partial_default_threshold_bps of total owed.
+    PartialDefault,
     Defaulted,
+    /// #664: Default was forgiven by admin.
+    ForgivenDefault,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -188,6 +192,10 @@ pub enum DataKey {
     StakingDerivative(Address, Address),
     // #637: Fraud Detection
     VoucherFraudScore(Address),
+    // #663: Partial default count per borrower
+    PartialDefaultCount(Address),
+    // #664: Slash record with forgiveness info per loan
+    SlashRecord(u64),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -241,6 +249,10 @@ pub struct Config {
     pub prepayment_penalty_bps: u32,
     /// #634: Liquidity mining reward rate in basis points per epoch (e.g. 50 = 0.5% per 7 days).
     pub liquidity_mining_rate_bps: u32,
+    /// #663: Minimum repayment fraction (in basis points) below which a loan is considered a
+    /// partial default. E.g. 5000 = 50% — if borrower repays less than 50% of total owed,
+    /// the loan is marked PartialDefault instead of Defaulted. 0 = feature disabled.
+    pub partial_default_threshold_bps: u32,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -531,3 +543,25 @@ pub const FRAUD_SCORE_HIGH_THRESHOLD: u32 = 70;
 pub const FRAUD_SCORE_MAX: u32 = 100;
 pub const FRAUD_SCORE_DEFAULT_WEIGHT: u32 = 20;
 pub const FRAUD_SCORE_CONCENTRATION_WEIGHT: u32 = 10;
+
+// ── #664: Slash Record with Forgiveness ───────────────────────────────────────
+
+/// Records a slash event against a loan, including optional forgiveness info.
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashRecord {
+    /// Loan ID that was slashed.
+    pub loan_id: u64,
+    /// Borrower address.
+    pub borrower: Address,
+    /// Total amount slashed across all vouchers, in stroops.
+    pub total_slashed: i128,
+    /// Ledger timestamp when the slash occurred.
+    pub slash_timestamp: u64,
+    /// Whether this slash has been forgiven by an admin.
+    pub forgiven: bool,
+    /// Admin-supplied reason for forgiveness (empty string if not forgiven).
+    pub forgiveness_reason: soroban_sdk::String,
+    /// Timestamp when forgiveness was granted (0 if not forgiven).
+    pub forgiven_at: u64,
+}
