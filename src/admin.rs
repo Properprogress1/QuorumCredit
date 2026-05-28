@@ -244,6 +244,9 @@ pub fn set_config(env: Env, admin_signers: Vec<Address>, config: Config) {
     if config.max_loan_to_stake_ratio == 0 {
         panic_with_error!(&env, ContractError::InvalidAmount);
     }
+    if config.recovery_percentage > 10_000 {
+        panic_with_error!(&env, ContractError::InvalidBps);
+    }
     env.storage().instance().set(&DataKey::Config, &config);
     env.events().publish(
         (symbol_short!("admin"), symbol_short!("config")),

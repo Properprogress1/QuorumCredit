@@ -59,6 +59,13 @@ pub const TIMELOCK_EXPIRY: u64 = 72 * 60 * 60;
 /// immediately withdraws.
 pub const MIN_VOUCH_LOCK_PERIOD: u64 = 7 * 24 * 60 * 60;
 
+/// Fraction of slashed funds routed to the insurance pool (2000 = 20%).
+pub const SLASH_TO_INSURANCE_BPS: u32 = 2_000;
+/// Default insurance fee on loan disbursement (50 = 0.5%).
+pub const DEFAULT_INSURANCE_FEE_BPS: u32 = 50;
+/// Default max insurance payout as % of slashed stake (2500 = 25%).
+pub const DEFAULT_INSURANCE_COVERAGE_BPS: u32 = 2_500;
+
 /// Extension fee charged when a borrower requests a loan extension, in basis points (100 = 1%).
 pub const EXTENSION_FEE_BPS: i128 = 100;
 
@@ -165,7 +172,10 @@ pub enum DataKey {
     VouchDelegation(Address, Address, Address), // (borrower, original_voucher, token) → Address (delegate)
     YieldReserve,            // i128 balance of the yield reserve
     SlashEscrow(Address),    // borrower → (i128 amount, u64 release_timestamp)
-    SlashAudit(Address),     // borrower → SlashAuditRecord
+    SlashAudit(Address),     // borrower → SlashRecord (latest slash for borrower)
+    SlashRecord(u64),        // slash_id → SlashRecord
+    SlashRecordCounter,      // u64 monotonic slash ID counter
+    BorrowerRegistered(Address), // borrower → registration timestamp
     // Issue #598-601 additions
     PrepaymentPenaltyBps,    // u32: prepayment penalty in basis points
     YieldDistribution(u64),  // loan_id → Vec<YieldDistributionEntry>
@@ -411,11 +421,19 @@ pub enum TimelockAction {
 
 #[contracttype]
 #[derive(Clone)]
-pub struct SlashAuditRecord {
+pub struct SlashRecord {
+    pub slash_id: u64,
     pub borrower: Address,
+    pub loan_id: u64,
     pub loan_amount: i128,
     pub total_slashed: i128,
     pub slash_timestamp: u64,
+    /// Amount returned to borrower from treasury on full repay (0 until recovered).
+    pub recovery_amount: i128,
+    /// Set by admin on reversal; None when not reversed.
+    pub reversal_reason: Option<soroban_sdk::String>,
+    /// True once an admin has reversed this slash.
+    pub reversed: bool,
 }
 
 #[contracttype]

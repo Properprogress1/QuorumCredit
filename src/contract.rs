@@ -64,6 +64,9 @@ impl QuorumCreditContract {
                 min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
                 prepayment_penalty_bps: 0,
                 liquidity_mining_rate_bps: DEFAULT_LIQUIDITY_MINING_RATE_BPS,
+                recovery_percentage: 0,
+                redistribution_rule: RedistributionRule::Treasury,
+                immunity_period_seconds: 0,
             },
         );
 
@@ -1417,8 +1420,22 @@ impl QuorumCreditContract {
     }
 
     /// Get slash audit record for a borrower (Issue #536).
-    pub fn get_slash_audit(env: Env, borrower: Address) -> Option<crate::types::SlashAuditRecord> {
-        loan::get_slash_audit(env, borrower)
+    pub fn get_slash_record(env: Env, slash_id: u64) -> Option<crate::types::SlashRecord> {
+        governance::get_slash_record(env, slash_id)
+    }
+
+    pub fn get_slash_audit(env: Env, borrower: Address) -> Option<crate::types::SlashRecord> {
+        governance::get_slash_record_for_borrower(env, borrower)
+    }
+
+    /// Admin-only: reverse a slash and restore slashed funds to the borrower.
+    pub fn reverse_slash(
+        env: Env,
+        admin_signers: Vec<Address>,
+        slash_id: u64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
+        governance::reverse_slash(env, admin_signers, slash_id, reason)
     }
 
     /// Repay loan with partial payment support (Issue #538).

@@ -227,6 +227,7 @@ fn do_vouch(
     stake: i128,
     token: Address,
 ) -> Result<(), ContractError> {
+    crate::helpers::register_borrower_if_needed(env, &borrower);
     let (token_client, vouches) = validate_vouch(env, cfg, &voucher, &borrower, stake, &token)?;
     commit_vouch(env, &token_client, voucher, borrower, stake, token, vouches)
 }
@@ -739,4 +740,112 @@ fn distribute_penalty(
             token_client.transfer(&contract, &vr.voucher, &share);
         }
     }
+}
+
+pub fn transfer_vouch(
+    _env: Env,
+    _from: Address,
+    _to: Address,
+    _borrower: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn delegate_vouch(
+    _env: Env,
+    _voucher: Address,
+    _borrower: Address,
+    _delegate: Address,
+    _token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn revoke_delegation(
+    _env: Env,
+    _voucher: Address,
+    _borrower: Address,
+    _token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn set_vouch_expiry(
+    _env: Env,
+    _voucher: Address,
+    _borrower: Address,
+    _expiry: u64,
+    _token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn get_vouch_history(
+    env: Env,
+    _borrower: Address,
+    _voucher: Address,
+    _token: Address,
+) -> Vec<crate::types::VouchHistoryEntry> {
+    Vec::new(&env)
+}
+
+pub fn vouch_exists(env: Env, voucher: Address, borrower: Address) -> bool {
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower))
+        .unwrap_or(Vec::new(&env));
+    vouches.iter().any(|v| v.voucher == voucher)
+}
+
+pub fn voucher_history(env: Env, _voucher: Address) -> Vec<Address> {
+    Vec::new(&env)
+}
+
+pub fn get_voucher_stats(
+    env: Env,
+    voucher: Address,
+) -> crate::types::VoucherStats {
+    env.storage()
+        .persistent()
+        .get(&DataKey::VoucherStats(voucher))
+        .unwrap_or(crate::types::VoucherStats {
+            successful_vouches: 0,
+            total_vouches_slashed: 0,
+            total_yield_earned: 0,
+            total_slashed: 0,
+        })
+}
+
+pub fn total_vouched(env: Env, borrower: Address) -> Result<i128, ContractError> {
+    let cfg = crate::helpers::config(&env);
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower))
+        .unwrap_or(Vec::new(&env));
+    let total: i128 = vouches
+        .iter()
+        .filter(|v| v.token == cfg.token)
+        .map(|v| v.stake)
+        .sum();
+    Ok(total)
+}
+
+pub fn request_vouch_withdrawal(
+    _env: Env,
+    _voucher: Address,
+    _borrower: Address,
+    _token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn execute_vouch_withdrawal(
+    _env: Env,
+    _voucher: Address,
+    _borrower: Address,
+    _token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
 }
