@@ -57,8 +57,14 @@ pub enum ContractError {
     WithdrawalNotQueued = 47,
     /// Partial withdrawal amount exceeds the 50% cap.
     PartialWithdrawalExceedsCap = 48,
-    /// Borrower has used all allowed deferment periods.
-    DefermentLimitReached = 49,
-    /// Loan has been accelerated due to a trigger condition.
-    LoanAccelerated = 50,
+    /// Borrower was slashed too recently; slash cooldown is still active.
+    SlashCooldownActive = 49,
+    /// Caller is not an admin or protocol-token holder allowed to govern.
+    NotGovernanceParticipant = 50,
+    /// Governance action is not allowed after the voting period has ended.
+    VotingPeriodEnded = 51,
+    /// Governance proposal was not found.
+    ProposalNotFound = 52,
+    /// Governance proposal was already finalized.
+    ProposalAlreadyFinalized = 53,
 }
