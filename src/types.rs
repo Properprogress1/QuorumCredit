@@ -72,6 +72,12 @@ pub const EXTENSION_FEE_BPS: i128 = 100;
 /// Maximum number of extensions allowed per loan.
 pub const MAX_EXTENSIONS_PER_LOAN: u32 = 2;
 
+/// Default liquidity mining reward rate in basis points per epoch (50 = 0.5% per 7 days).
+pub const DEFAULT_LIQUIDITY_MINING_RATE_BPS: u32 = 50;
+
+/// Default dynamic slash threshold setting (false = disabled by default).
+pub const DEFAULT_DYNAMIC_SLASH_THRESHOLD: bool = false;
+
 /// Timelock delay for decrease_stake during an active loan, in seconds (7 days).
 pub const DECREASE_STAKE_TIMELOCK: u64 = 7 * 24 * 60 * 60;
 
@@ -89,6 +95,15 @@ pub const PARTIAL_WITHDRAWAL_PENALTY_BPS: i128 = 1_000;
 
 /// Maximum fraction of stake that can be partially withdrawn during an active loan (50%).
 pub const PARTIAL_WITHDRAWAL_MAX_BPS: i128 = 5_000;
+
+/// Minimum slash threshold when protocol health is excellent, in basis points (2500 = 25%).
+pub const MIN_DYNAMIC_SLASH_BPS: i128 = 2_500;
+
+/// Maximum slash threshold when protocol health is poor, in basis points (7500 = 75%).
+pub const MAX_DYNAMIC_SLASH_BPS: i128 = 7_500;
+
+/// Health threshold below which slash penalty increases, in basis points (8000 = 80%).
+pub const HEALTH_THRESHOLD_BPS: i128 = 8_000;
 
 // ── Loan Extension ────────────────────────────────────────────────────────────
 

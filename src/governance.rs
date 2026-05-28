@@ -444,7 +444,7 @@ fn execute_slash(env: &Env, borrower: &Address) -> Result<(), ContractError> {
     } else {
         env.storage()
             .persistent()
-            .set(&DataKey::Vouches(borrower.clone()), &remaining_vouches);
+        .set(&DataKey::Vouches(borrower.clone()), &remaining_vouches);
     }
 
     let slash_id = next_slash_id(env);
