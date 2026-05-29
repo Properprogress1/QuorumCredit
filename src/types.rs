@@ -108,6 +108,12 @@ pub const HEALTH_THRESHOLD_BPS: i128 = 8_000;
 /// Default slash delay period to allow for disputes, in seconds (7 days).
 pub const DEFAULT_SLASH_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+/// Duration of one reporting month, in seconds (30 days).
+pub const MONTHLY_PERIOD_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Default premium rate for slashing insurance opt-in, in basis points (100 = 1%).
+pub const DEFAULT_INSURANCE_PREMIUM_BPS: u32 = 100;
+
 // ── Loan Extension ────────────────────────────────────────────────────────────
 
 /// A pending loan extension request. Created by the borrower; approved by vouchers.
@@ -269,6 +275,13 @@ pub enum DataKey {
     ExternalCreditScore(Address),
     // #666: Escrowed repayment amount per borrower (held pending oracle verification)
     EscrowAmount(Address),
+    /// Monthly slashing transparency report: month_id → SlashingReportRecord.
+    /// month_id = unix_timestamp / MONTHLY_PERIOD_SECS
+    SlashingReport(u64),
+    /// Per-vouch insurance opt-in: (voucher, borrower) → bool (insured).
+    VoucherInsurance(Address, Address),
+    /// Cross-chain bridge validation status: (voucher, chain_id) → bool.
+    BridgeValidated(Address, u32),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -517,6 +530,41 @@ pub enum TimelockAction {
     SetConfig(Config),
 }
 
+/// Escrow state for a repayment pending oracle verification.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    /// No escrow in flight (default).
+    None,
+    /// Repayment held pending oracle approval.
+    Pending,
+    /// Oracle approved — funds released to vouchers.
+    Released,
+    /// Oracle rejected — funds returned to borrower.
+    Rejected,
+}
+
+/// A slash execution that has been approved by governance but is waiting for
+/// its `executable_at` delay to elapse before it can be carried out.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingSlashRecord {
+    pub borrower: Address,
+    pub approved_at: u64,
+    pub executable_at: u64,
+    pub executed: bool,
+}
+
+/// Controls where redistributable slash funds flow after insurance allocation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RedistributionRule {
+    /// Route to the slash treasury (default).
+    Treasury,
+    /// Redistribute pro-rata to remaining active vouchers of the borrower.
+    Vouchers,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct SlashRecord {
@@ -532,6 +580,22 @@ pub struct SlashRecord {
     pub reversal_reason: Option<soroban_sdk::String>,
     /// True once an admin has reversed this slash.
     pub reversed: bool,
+}
+
+/// Monthly aggregated report of all slashing events.
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashingReportRecord {
+    /// Month identifier: unix_timestamp / MONTHLY_PERIOD_SECS.
+    pub month_id: u64,
+    /// Total number of slash events in this month.
+    pub total_slashes: u32,
+    /// Total amount slashed across all events, in stroops.
+    pub total_slashed: i128,
+    /// Number of slashes subsequently reversed by admins.
+    pub total_reversed: u32,
+    /// Slash IDs recorded during this month.
+    pub slash_ids: Vec<u64>,
 }
 
 #[contracttype]
@@ -650,20 +714,6 @@ pub struct VoucherStats {
     pub total_slashed: i128,
 }
 
-// ── Issue #635: Vouch Snapshot ────────────────────────────────────────────────
-
-/// A single entry in a governance vouch snapshot.
-#[contracttype]
-#[derive(Clone)]
-pub struct VouchSnapshotEntry {
-    /// The borrower whose vouches are snapshotted.
-    pub borrower: Address,
-    /// Total stake vouched for this borrower at snapshot time, in stroops.
-    pub total_stake: i128,
-    /// Number of active vouchers at snapshot time.
-    pub voucher_count: u32,
-}
-
 // ── Pause Mode ────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -686,8 +736,6 @@ pub struct ThawState {
 
 /// Epoch duration for liquidity mining rewards (7 days).
 pub const LIQUIDITY_MINING_EPOCH_SECS: u64 = 7 * 24 * 60 * 60;
-/// Default liquidity mining rate: 50 bps = 0.5% per epoch.
-pub const DEFAULT_LIQUIDITY_MINING_RATE_BPS: u32 = 50;
 
 // ── #635: Vouch Snapshot for Governance ──────────────────────────────────────
 

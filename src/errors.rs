@@ -53,7 +53,7 @@ pub enum ContractError {
     /// Basis points value is invalid (must be 0–10000).
     InvalidBps = 46,
     /// Withdrawal request already queued for this voucher/borrower pair.
-    WithdrawalAlreadyQueued = 46,
+    WithdrawalAlreadyQueued = 57,
     /// No queued withdrawal found for this voucher/borrower pair.
     WithdrawalNotQueued = 47,
     /// Partial withdrawal amount exceeds the 50% cap.

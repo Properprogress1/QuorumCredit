@@ -493,7 +493,7 @@ impl QuorumCreditContract {
                 // Issue #634: Liquidity mining reward on top of yield.
                 let cfg = config(&env);
                 let mining_reward = if cfg.liquidity_mining_rate_bps > 0 {
-                    v.stake * cfg.liquidity_mining_rate_bps / 10_000
+                    v.stake * cfg.liquidity_mining_rate_bps as i128 / 10_000
                 } else {
                     0
                 };
@@ -532,7 +532,7 @@ impl QuorumCreditContract {
             }
 
             env.events().publish(
-                (symbol_short!("loan"), symbol_short!("escrow_rej")),
+                (symbol_short!("loan"), symbol_short!("escrw_rej")),
                 (borrower.clone(), escrowed),
             );
         }
