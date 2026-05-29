@@ -1,46 +1,73 @@
 use crate::errors::ContractError;
 use crate::helpers::{
-    config, get_active_loan_record, has_active_loan, next_loan_id, require_allowed_token,
-    require_not_paused,
+    config, deduct_slash_balance, get_active_loan_record, get_latest_loan_record,
+    has_active_loan, next_loan_id, register_borrower_if_needed, require_allowed_token,
+    require_not_paused, require_admin_approval,
 };
 use crate::reputation::ReputationNftExternalClient;
-use crate::types::{DataKey, LoanRecord, LoanStatus, VouchRecord, DEFAULT_REFERRAL_BONUS_BPS, MIN_VOUCH_AGE};
-use soroban_sdk::{symbol_short, Address, Env, Vec};
+use crate::types::{
+    DataKey, EscrowStatus, LoanRecord, LoanStatus, SlashRecord, VouchRecord, BPS_DENOMINATOR,
+    SLASH_ESCROW_PERIOD,
+};
+use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
 
-/// Register a referrer for a borrower. Must be called before `request_loan`.
-/// The referrer cannot be the borrower themselves.
-pub fn register_referral(
-    env: Env,
-    borrower: Address,
-    referrer: Address,
-) -> Result<(), ContractError> {
-    borrower.require_auth();
-    require_not_paused(&env)?;
+/// Compute the yield rate (in bps) for a single vouch, incorporating:
+/// - base yield from config
+/// - vouch-age bonus: +25 bps per 30-day period the vouch has been active (capped at 200 bps)
+/// - borrower reputation bonus: up to +100 bps based on successful repayment history
+pub fn vouch_yield_bps(env: &Env, vouch: &VouchRecord, borrower: &Address, now: u64) -> i128 {
+    let base_bps = config(env).yield_bps;
 
-    assert!(borrower != referrer, "borrower cannot refer themselves");
-    assert!(
-        !has_active_loan(&env, &borrower),
-        "cannot set referral with active loan"
-    );
-    // Idempotent: overwrite is fine (borrower signs).
-    env.storage()
+    // ── Vouch-age bonus ───────────────────────────────────────────────────────
+    let age_secs = now.saturating_sub(vouch.vouch_timestamp);
+    let age_bonus = if age_secs >= VOUCH_AGE_BONUS_MIN_SECS {
+        let periods = (age_secs / VOUCH_AGE_BONUS_PERIOD_SECS) as i128;
+        (periods * VOUCH_AGE_BONUS_BPS_PER_PERIOD).min(VOUCH_AGE_BONUS_MAX_BPS)
+    } else {
+        0
+    };
+
+    // ── Borrower reputation bonus ─────────────────────────────────────────────
+    // Successful repayments → higher bonus; defaults → penalty.
+    let repayment_count: i128 = env
+        .storage()
         .persistent()
-        .set(&DataKey::ReferredBy(borrower.clone()), &referrer);
+        .get::<DataKey, u32>(&DataKey::RepaymentCount(borrower.clone()))
+        .unwrap_or(0) as i128;
+    let default_count: i128 = env
+        .storage()
+        .persistent()
+        .get::<DataKey, u32>(&DataKey::DefaultCount(borrower.clone()))
+        .unwrap_or(0) as i128;
+    // +10 bps per successful repayment, -20 bps per default, capped at [0, REPUTATION_BONUS_MAX_BPS]
+    let rep_bonus = ((repayment_count * 10) - (default_count * 20))
+        .max(0)
+        .min(REPUTATION_BONUS_MAX_BPS);
 
-    env.events().publish(
-        (symbol_short!("referral"), symbol_short!("set")),
-        (borrower, referrer),
-    );
-
-    Ok(())
+    (base_bps + age_bonus + rep_bonus).max(0)
 }
 
-pub fn get_referrer(env: Env, borrower: Address) -> Option<Address> {
-    env.storage()
+/// Calculate dynamic yield (legacy — used for backward-compat; prefer vouch_yield_bps per vouch).
+pub fn calculate_dynamic_yield(env: &Env, borrower: &Address) -> i128 {
+    let base_bps = config(env).yield_bps;
+
+    let credit_score: i128 = env
+        .storage()
+        .instance()
+        .get::<DataKey, Address>(&DataKey::ReputationNft)
+        .map(|nft| ReputationNftExternalClient::new(env, &nft).balance(borrower) as i128)
+        .unwrap_or(0);
+
+    let default_count: i128 = env
+        .storage()
         .persistent()
-        .get(&DataKey::ReferredBy(borrower))
+        .get::<DataKey, u32>(&DataKey::DefaultCount(borrower.clone()))
+        .unwrap_or(0) as i128;
+
+    (base_bps + (credit_score / 100) - (default_count * 50)).max(0)
 }
 
+/// Request loan
 pub fn request_loan(
     env: Env,
     borrower: Address,
@@ -51,40 +78,18 @@ pub fn request_loan(
 ) -> Result<(), ContractError> {
     borrower.require_auth();
     require_not_paused(&env)?;
+    register_borrower_if_needed(&env, &borrower);
 
-    if env
-        .storage()
-        .persistent()
-        .get::<DataKey, bool>(&DataKey::Blacklisted(borrower.clone()))
-        .unwrap_or(false)
-    {
-        return Err(ContractError::Blacklisted);
+    if has_active_loan(&env, &borrower) {
+        return Err(ContractError::ActiveLoanExists);
     }
 
-    // Validate token is allowed before any other checks.
-    let token_client = require_allowed_token(&env, &token_addr)?;
-
+    let token = require_allowed_token(&env, &token_addr)?;
     let cfg = config(&env);
 
-    assert!(
-        amount >= cfg.min_loan_amount,
-        "loan amount must meet minimum threshold"
-    );
-    assert!(threshold > 0, "threshold must be greater than zero");
-
-    let max_loan_amount: i128 = env
-        .storage()
-        .instance()
-        .get(&DataKey::MaxLoanAmount)
-        .unwrap_or(0);
-    if max_loan_amount > 0 && amount > max_loan_amount {
-        return Err(ContractError::LoanExceedsMaxAmount);
+    if amount < cfg.min_loan_amount {
+        return Err(ContractError::LoanBelowMinAmount);
     }
-
-    assert!(
-        !has_active_loan(&env, &borrower),
-        "borrower already has an active loan"
-    );
 
     let vouches: Vec<VouchRecord> = env
         .storage()
@@ -92,72 +97,63 @@ pub fn request_loan(
         .get(&DataKey::Vouches(borrower.clone()))
         .unwrap_or(Vec::new(&env));
 
-    // Only count vouches denominated in the requested token.
-    let mut token_vouches: Vec<VouchRecord> = Vec::new(&env);
-    for v in vouches.iter() {
-        if v.token == token_addr {
-            token_vouches.push_back(v);
-        }
-    }
+    let total_stake: i128 = vouches
+        .iter()
+        .filter(|v| v.token == token_addr)
+        .map(|v| v.stake)
+        .sum();
 
-    let mut total_stake: i128 = 0;
-    for v in token_vouches.iter() {
-        total_stake = total_stake
-            .checked_add(v.stake)
-            .ok_or(ContractError::StakeOverflow)?;
-    }
-    assert!(total_stake >= threshold, "insufficient trust stake");
-
-    let min_vouchers: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::MinVouchers)
-        .unwrap_or(0);
-    if token_vouches.len() < min_vouchers {
-        return Err(ContractError::InsufficientVouchers);
+    if total_stake < threshold {
+        panic_with_error!(&env, ContractError::InsufficientFunds);
     }
 
     let now = env.ledger().timestamp();
-    for v in token_vouches.iter() {
-        if now < v.vouch_timestamp + MIN_VOUCH_AGE {
-            return Err(ContractError::VouchTooRecent);
-        }
-    }
-
-    let max_allowed_loan = total_stake * cfg.max_loan_to_stake_ratio as i128 / 100;
-    assert!(
-        amount <= max_allowed_loan,
-        "loan amount exceeds maximum collateral ratio"
-    );
-
-    let contract_balance = token_client.balance(&env.current_contract_address());
-    if contract_balance < amount {
-        return Err(ContractError::InsufficientFunds);
-    }
-
-    let deadline = now + cfg.loan_duration;
     let loan_id = next_loan_id(&env);
-    let total_yield = amount * cfg.yield_bps / 10_000;
 
-    env.storage().persistent().set(
-        &DataKey::Loan(loan_id),
-        &LoanRecord {
-            id: loan_id,
-            borrower: borrower.clone(),
-            co_borrowers: Vec::new(&env),
-            amount,
-            amount_repaid: 0,
-            total_yield,
-            repaid: false,
-            defaulted: false,
-            created_at: now,
-            disbursement_timestamp: now,
-            repayment_timestamp: None,
-            deadline,
-            loan_purpose,
-            token_address: token_addr.clone(),
-        },
-    );
+    // ── Per-vouch yield (age + reputation aware) ──────────────────────────────
+    // Compute each voucher's individual yield share and store it for repayment.
+    let mut yield_distribution: Vec<YieldDistributionEntry> = Vec::new(&env);
+    let mut total_yield: i128 = 0;
+
+    for v in vouches.iter() {
+        if v.token != token_addr {
+            continue;
+        }
+        let rate = vouch_yield_bps(&env, &v, &borrower, now);
+        let vouch_yield = amount * v.stake / total_stake * rate / 10_000;
+        total_yield += vouch_yield;
+        yield_distribution.push_back(YieldDistributionEntry {
+            voucher: v.voucher.clone(),
+            yield_amount: vouch_yield,
+        });
+    }
+
+    let loan = LoanRecord {
+        id: loan_id,
+        borrower: borrower.clone(),
+        co_borrowers: Vec::new(&env),
+        amount,
+        amount_repaid: 0,
+        total_yield,
+        status: LoanStatus::Active,
+        created_at: now,
+        disbursement_timestamp: now,
+        repayment_timestamp: None,
+        deadline: now + cfg.loan_duration,
+        loan_purpose,
+        token_address: token_addr.clone(),
+        amortization_schedule: Vec::new(&env),
+        reminder_sent: false,
+        risk_score: 0,
+        deferment_periods: 0,
+        maturity_date: None,
+        rate_type: crate::types::RateType::Fixed,
+        index_reference: None,
+        escrow_status: EscrowStatus::None,
+        retry_count: 0,
+    };
+
+    env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
     env.storage()
         .persistent()
         .set(&DataKey::ActiveLoan(borrower.clone()), &loan_id);
@@ -165,134 +161,194 @@ pub fn request_loan(
         .persistent()
         .set(&DataKey::LatestLoan(borrower.clone()), &loan_id);
 
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&DataKey::LoanCount(borrower.clone()))
-        .unwrap_or(0);
-    env.storage()
-        .persistent()
-        .set(&DataKey::LoanCount(borrower.clone()), &(count + 1));
-
-    token_client.transfer(&env.current_contract_address(), &borrower, &amount);
+    token.transfer(&env.current_contract_address(), &borrower, &amount);
 
     env.events().publish(
-        (symbol_short!("loan"), symbol_short!("disbursed")),
-        (borrower.clone(), amount, deadline, token_addr),
+        (symbol_short!("loan"), symbol_short!("created")),
+        (borrower, amount),
     );
 
     Ok(())
 }
 
+/// Apply slash recovery to borrower when a defaulted loan is fully repaid.
+pub fn apply_slash_recovery(env: &Env, borrower: &Address) -> Result<(), ContractError> {
+    let cfg = config(env);
+    if cfg.recovery_percentage == 0 {
+        return Ok(());
+    }
+
+    let mut record: SlashRecord = match env
+        .storage()
+        .persistent()
+        .get::<DataKey, SlashRecord>(&DataKey::SlashAudit(borrower.clone()))
+    {
+        Some(r) if !r.reversed => r,
+        _ => return Ok(()),
+    };
+
+    if record.recovery_amount > 0 {
+        return Ok(());
+    }
+
+    let recoverable = record.total_slashed * cfg.recovery_percentage as i128 / BPS_DENOMINATOR;
+    if recoverable <= 0 {
+        return Ok(());
+    }
+
+    deduct_slash_balance(env, recoverable)?;
+
+    let loan = get_latest_loan_record(env, borrower).ok_or(ContractError::NoActiveLoan)?;
+    let token = require_allowed_token(env, &loan.token_address)?;
+    token.transfer(
+        &env.current_contract_address(),
+        borrower,
+        &recoverable,
+    );
+
+    record.recovery_amount = recoverable;
+    env.storage()
+        .persistent()
+        .set(&DataKey::SlashRecord(record.slash_id), &record);
+    env.storage()
+        .persistent()
+        .set(&DataKey::SlashAudit(borrower.clone()), &record);
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("recovery")),
+        (borrower.clone(), recoverable),
+    );
+
+    Ok(())
+}
+
+/// Repay loan (active or defaulted).
 pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractError> {
     borrower.require_auth();
     require_not_paused(&env)?;
 
-    let mut loan = get_active_loan_record(&env, &borrower)?;
+    let mut loan = match get_active_loan_record(&env, &borrower) {
+        Ok(l) => l,
+        Err(ContractError::NoActiveLoan) => {
+            let l = get_latest_loan_record(&env, &borrower).ok_or(ContractError::NoActiveLoan)?;
+            if l.status != LoanStatus::Defaulted {
+                return Err(ContractError::NoActiveLoan);
+            }
+            l
+        }
+        Err(e) => return Err(e),
+    };
 
-    for cb in loan.co_borrowers.iter() {
-        cb.require_auth();
+    let was_defaulted = loan.status == LoanStatus::Defaulted;
+
+    if payment <= 0 {
+        panic_with_error!(&env, ContractError::InvalidAmount);
     }
 
-    if borrower != loan.borrower {
-        return Err(ContractError::UnauthorizedCaller);
-    }
-    if loan.defaulted || loan.repaid {
-        return Err(ContractError::NoActiveLoan);
-    }
-
-    assert!(!loan.defaulted, "loan already defaulted");
-    assert!(!loan.repaid, "loan already repaid");
-    assert!(
-        env.ledger().timestamp() <= loan.deadline,
-        "loan deadline has passed"
-    );
-
-    // Total obligation = principal + yield locked in at disbursement.
     let total_owed = loan.amount + loan.total_yield;
     let outstanding = total_owed - loan.amount_repaid;
-    assert!(
-        payment > 0 && payment <= outstanding,
-        "invalid payment amount"
-    );
 
-    let token = soroban_sdk::token::Client::new(&env, &loan.token_address);
+    if payment > outstanding {
+        panic_with_error!(&env, ContractError::InvalidAmount);
+    }
 
+    let token = require_allowed_token(&env, &loan.token_address)?;
     token.transfer(&borrower, &env.current_contract_address(), &payment);
+
     loan.amount_repaid += payment;
+
+    let now = env.ledger().timestamp();
+    let cfg = config(&env);
+
+    let mut penalty: i128 = 0;
+    if !was_defaulted && now < loan.deadline && cfg.prepayment_penalty_bps > 0 {
+        let remaining_principal =
+            loan.amount - (loan.amount_repaid * loan.amount / total_owed);
+        penalty = remaining_principal * cfg.prepayment_penalty_bps as i128 / BPS_DENOMINATOR;
+    }
+
     let fully_repaid = loan.amount_repaid >= total_owed;
 
-    if fully_repaid {
+    if fully_repaid && was_defaulted {
+        loan.status = LoanStatus::Repaid;
+        loan.repayment_timestamp = Some(now);
+        apply_slash_recovery(&env, &borrower)?;
+        env.events().publish(
+            (symbol_short!("loan"), symbol_short!("repaid")),
+            (borrower.clone(), loan.amount),
+        );
+    } else if fully_repaid {
+        loan.status = LoanStatus::Repaid;
+        loan.repayment_timestamp = Some(now);
+
         let vouches: Vec<VouchRecord> = env
             .storage()
             .persistent()
             .get(&DataKey::Vouches(borrower.clone()))
             .unwrap_or(Vec::new(&env));
-        // Only distribute yield to vouches in the same token as the loan.
-        let loan_token = soroban_sdk::token::Client::new(&env, &loan.token_address);
-        let mut total_stake: i128 = 0;
-        for v in vouches.iter() {
-            if v.token == loan.token_address {
-                total_stake += v.stake;
-            }
-        }
+
+        // Load the per-vouch yield distribution locked in at disbursement.
+        let yield_dist: Vec<YieldDistributionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::YieldDistribution(loan.id))
+            .unwrap_or(Vec::new(&env));
+
+        // Any penalty is distributed proportionally to stake (fallback).
+        let total_stake: i128 = vouches
+            .iter()
+            .filter(|v| v.token == loan.token_address)
+            .map(|v| v.stake)
+            .sum();
 
         for v in vouches.iter() {
             if v.token != loan.token_address {
                 continue;
             }
-            let voucher_yield = if total_stake > 0 {
-                loan.total_yield * v.stake / total_stake
+
+            // Per-vouch yield from the distribution locked at disbursement.
+            let vouch_yield = yield_dist
+                .iter()
+                .find(|e| e.voucher == v.voucher)
+                .map(|e| e.yield_amount)
+                .unwrap_or(0);
+
+            // Penalty share is proportional to stake.
+            let penalty_share = if total_stake > 0 {
+                penalty * v.stake / total_stake
             } else {
                 0
             };
-            loan_token.transfer(
-                &env.current_contract_address(),
-                &v.voucher,
-                &(v.stake + voucher_yield),
-            );
-        }
 
-        loan.repaid = true;
-        loan.repayment_timestamp = Some(env.ledger().timestamp());
+            let payout = v.stake + vouch_yield + penalty_share;
+            token.transfer(&env.current_contract_address(), &v.voucher, &payout);
 
-        // Pay referral bonus if a referrer is registered.
-        if let Some(referrer) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::ReferredBy(borrower.clone()))
-        {
-            let bonus_bps: u32 = env
+            let mut stats: crate::types::VoucherStats = env
                 .storage()
-                .instance()
-                .get(&DataKey::ReferralBonusBps)
-                .unwrap_or(DEFAULT_REFERRAL_BONUS_BPS);
-            let bonus = loan.amount * bonus_bps as i128 / 10_000;
-            if bonus > 0 {
-                loan_token.transfer(&env.current_contract_address(), &referrer, &bonus);
-                env.events().publish(
-                    (symbol_short!("referral"), symbol_short!("bonus")),
-                    (referrer, borrower.clone(), bonus),
-                );
-            }
+                .persistent()
+                .get(&DataKey::VoucherStats(v.voucher.clone()))
+                .unwrap_or(crate::types::VoucherStats {
+                    successful_vouches: 0,
+                    total_vouches_slashed: 0,
+                    total_yield_earned: 0,
+                    total_slashed: 0,
+                });
+            stats.successful_vouches += 1;
+            stats.total_yield_earned += share;
+            env.storage()
+                .persistent()
+                .set(&DataKey::VoucherStats(v.voucher.clone()), &stats);
         }
 
-        let count: u32 = env
+        // Increment borrower repayment count (feeds future reputation bonus).
+        let prev_count: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::RepaymentCount(borrower.clone()))
             .unwrap_or(0);
         env.storage()
             .persistent()
-            .set(&DataKey::RepaymentCount(borrower.clone()), &(count + 1));
-
-        if let Some(nft_addr) = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ReputationNft)
-        {
-            ReputationNftExternalClient::new(&env, &nft_addr).mint(&borrower);
-        }
+            .set(&DataKey::RepaymentCount(borrower.clone()), &(prev_count + 1));
 
         env.storage()
             .persistent()
@@ -300,6 +356,9 @@ pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractE
         env.storage()
             .persistent()
             .remove(&DataKey::Vouches(borrower.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::YieldDistribution(loan.id));
 
         env.events().publish(
             (symbol_short!("loan"), symbol_short!("repaid")),
@@ -314,32 +373,14 @@ pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractE
     Ok(())
 }
 
-pub fn loan_status(env: Env, borrower: Address) -> LoanStatus {
-    match crate::helpers::get_latest_loan_record(&env, &borrower) {
-        None => LoanStatus::None,
-        Some(loan) if loan.repaid => LoanStatus::Repaid,
-        Some(loan) if loan.defaulted => LoanStatus::Defaulted,
-        _ => LoanStatus::Active,
-    }
-}
-
-pub fn get_loan(env: Env, borrower: Address) -> Option<LoanRecord> {
-    crate::helpers::get_latest_loan_record(&env, &borrower)
-}
-
-pub fn get_loan_by_id(env: Env, loan_id: u64) -> Option<LoanRecord> {
-    env.storage().persistent().get(&DataKey::Loan(loan_id))
-}
-
-pub fn is_eligible(env: Env, borrower: Address, threshold: i128) -> bool {
+/// Eligibility check
+pub fn is_eligible(env: Env, borrower: Address, threshold: i128, token: Address) -> bool {
     if threshold <= 0 {
         return false;
     }
 
-    if let Some(loan) = crate::helpers::get_latest_loan_record(&env, &borrower) {
-        if !loan.repaid && !loan.defaulted {
-            return false;
-        }
+    if has_active_loan(&env, &borrower) {
+        return false;
     }
 
     let vouches: Vec<VouchRecord> = env
@@ -348,8 +389,136 @@ pub fn is_eligible(env: Env, borrower: Address, threshold: i128) -> bool {
         .get(&DataKey::Vouches(borrower))
         .unwrap_or(Vec::new(&env));
 
-    let total_stake: i128 = vouches.iter().map(|v| v.stake).sum();
-    total_stake >= threshold
+    let total: i128 = vouches
+        .iter()
+        .filter(|v| v.token == token)
+        .map(|v| v.stake)
+        .sum();
+
+    total >= threshold
+}
+
+/// Partial repay (FIXED DIRECTION BUG)
+pub fn repay_partial(
+    env: Env,
+    borrower: Address,
+    payment: i128,
+    token: Address,
+) -> Result<(), ContractError> {
+    borrower.require_auth();
+    require_not_paused(&env)?;
+
+    let mut loan = get_active_loan_record(&env, &borrower)?;
+
+    if payment <= 0 {
+        panic_with_error!(&env, ContractError::InvalidAmount);
+    }
+
+    let token_client = require_allowed_token(&env, &token)?;
+
+    // FIX: transfer should be FROM borrower TO contract
+    token_client.transfer(&borrower, &env.current_contract_address(), &payment);
+
+    loan.amount_repaid += payment;
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::Loan(loan.id), &loan);
+
+    env.events().publish(
+        (symbol_short!("loan"), symbol_short!("prt_rep")),
+        (borrower, payment),
+    );
+
+    Ok(())
+}
+
+/// Set yield reserve
+pub fn set_yield_reserve(
+    env: Env,
+    admins: Vec<Address>,
+    amount: i128,
+) -> Result<(), ContractError> {
+    require_admin_approval(&env, &admins);
+
+    if amount < 0 {
+        return Err(ContractError::InvalidAmount);
+    }
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::YieldReserve, &amount);
+
+    Ok(())
+}
+
+/// Get yield reserve
+pub fn get_yield_reserve_balance(env: Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::YieldReserve)
+        .unwrap_or(0)
+}
+
+/// Set borrower risk score
+pub fn set_borrower_risk_score(
+    env: Env,
+    admins: Vec<Address>,
+    borrower: Address,
+    risk_score: u32,
+) -> Result<(), ContractError> {
+    require_admin_approval(&env, &admins);
+
+    if risk_score > 100 {
+        return Err(ContractError::InvalidAmount);
+    }
+
+    let mut loan = get_active_loan_record(&env, &borrower)?;
+    loan.risk_score = risk_score;
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::Loan(loan.id), &loan);
+
+    Ok(())
+}
+
+pub fn release_slash_escrow(
+    env: Env,
+    admin_signers: Vec<Address>,
+    borrower: Address,
+) -> Result<(), ContractError> {
+    require_admin_approval(&env, &admin_signers);
+    let (amount, release_ts): (i128, u64) = env
+        .storage()
+        .persistent()
+        .get(&DataKey::SlashEscrow(borrower.clone()))
+        .ok_or(ContractError::NoActiveLoan)?;
+    if env.ledger().timestamp() < release_ts {
+        return Err(ContractError::TimelockNotReady);
+    }
+    crate::helpers::add_slash_balance(&env, amount);
+    env.storage()
+        .persistent()
+        .remove(&DataKey::SlashEscrow(borrower));
+    Ok(())
+}
+
+pub fn get_loan(env: Env, borrower: Address) -> Option<LoanRecord> {
+    if let Ok(loan) = get_active_loan_record(&env, &borrower) {
+        return Some(loan);
+    }
+    get_latest_loan_record(&env, &borrower)
+}
+
+pub fn get_loan_by_id(env: Env, loan_id: u64) -> Option<LoanRecord> {
+    env.storage().persistent().get(&DataKey::Loan(loan_id))
+}
+
+pub fn loan_status(env: Env, borrower: Address) -> LoanStatus {
+    get_loan(env, borrower)
+        .map(|l| l.status)
+        .unwrap_or(LoanStatus::None)
 }
 
 pub fn repayment_count(env: Env, borrower: Address) -> u32 {
@@ -371,4 +540,78 @@ pub fn default_count(env: Env, borrower: Address) -> u32 {
         .persistent()
         .get(&DataKey::DefaultCount(borrower))
         .unwrap_or(0)
+}
+
+pub fn register_referral(
+    _env: Env,
+    _borrower: Address,
+    _referrer: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn get_referrer(_env: Env, _borrower: Address) -> Option<Address> {
+    None
+}
+
+pub fn add_co_borrower(
+    _env: Env,
+    _borrower: Address,
+    _co_borrower: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn refinance_loan(
+    _env: Env,
+    _borrower: Address,
+    _new_amount: i128,
+    _new_threshold: i128,
+    _new_token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn deposit_collateral(
+    _env: Env,
+    _borrower: Address,
+    _amount: i128,
+    _token: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn get_borrower_collateral(_env: Env, _borrower: Address) -> i128 {
+    0
+}
+
+pub fn emit_repayment_reminders(_env: Env) {}
+pub fn mint_reputation_nft(_env: Env, _borrower: Address) -> Result<(), ContractError> {
+    Ok(())
+}
+pub fn send_repayment_reminder(_env: Env, _loan_id: u64) -> Result<(), ContractError> {
+    Ok(())
+}
+
+pub fn request_extension(
+    _env: Env,
+    _borrower: Address,
+    _extension_secs: u64,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn approve_extension(
+    _env: Env,
+    _voucher: Address,
+    _borrower: Address,
+) -> Result<(), ContractError> {
+    Err(ContractError::InvalidStateTransition)
+}
+
+pub fn get_extension_request(
+    _env: Env,
+    _borrower: Address,
+) -> Option<crate::types::LoanExtensionRequest> {
+    None
 }

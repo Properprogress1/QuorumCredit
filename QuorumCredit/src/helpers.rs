@@ -1,0 +1,368 @@
+use crate::errors::ContractError;
+use crate::types::{Config, DataKey, LoanRecord};
+use soroban_sdk::{token, Address, Env, String, Vec};
+
+/// Ledgers to live for persistent storage entries (~1 year at ~5s/ledger).
+const PERSISTENT_TTL_LEDGERS: u32 = 6_307_200;
+
+/// Extend the TTL of a persistent storage entry after every write.
+/// Call this immediately after `env.storage().persistent().set(key, ...)`.
+pub fn extend_ttl(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_TTL_LEDGERS, PERSISTENT_TTL_LEDGERS);
+}
+
+/// Returns true if the address is the all-zeros account or contract address.
+pub fn is_zero_address(env: &Env, addr: &Address) -> bool {
+    // Stellar zero account: all-zero 32-byte ed25519 key
+    let zero_account = Address::from_string(&String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
+    // Stellar zero contract: all-zero 32-byte contract hash
+    let zero_contract = Address::from_string(&String::from_str(
+        env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    ));
+    addr == &zero_account || addr == &zero_contract
+}
+
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        Err(ContractError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
+/// Task 1: Check if a specific function is paused
+pub fn require_not_paused_for(env: &Env, flag: crate::types::PauseFlag) -> Result<(), ContractError> {
+    let global_paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+    if global_paused {
+        return Err(ContractError::ContractPaused);
+    }
+    if is_paused_for(env, flag) {
+        Err(ContractError::FunctionPaused)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+}
+
+/// Per-function pause flags stored as a u32 bitmask under symbol key "pflag".
+pub fn is_paused_for(env: &Env, flag: crate::types::PauseFlag) -> bool {
+    if is_paused(env) {
+        return true;
+    }
+    let flag_bit: u32 = match flag {
+        crate::types::PauseFlag::None => return false,
+        crate::types::PauseFlag::Vouch => 1,
+        crate::types::PauseFlag::LoanRequest => 2,
+        crate::types::PauseFlag::Repay => 3,
+        crate::types::PauseFlag::Slash => 4,
+        crate::types::PauseFlag::Withdraw => 5,
+    };
+    let bitmask: u32 = env.storage().instance().get(&soroban_sdk::symbol_short!("pflag")).unwrap_or(0u32);
+    (bitmask & (1u32 << flag_bit)) != 0
+}
+
+pub fn set_paused_for(env: &Env, flag: crate::types::PauseFlag, paused: bool) {
+    let flag_bit: u32 = match flag {
+        crate::types::PauseFlag::None => return,
+        crate::types::PauseFlag::Vouch => 1,
+        crate::types::PauseFlag::LoanRequest => 2,
+        crate::types::PauseFlag::Repay => 3,
+        crate::types::PauseFlag::Slash => 4,
+        crate::types::PauseFlag::Withdraw => 5,
+    };
+    let mut bitmask: u32 = env.storage().instance().get(&soroban_sdk::symbol_short!("pflag")).unwrap_or(0u32);
+    if paused {
+        bitmask |= 1u32 << flag_bit;
+    } else {
+        bitmask &= !(1u32 << flag_bit);
+    }
+    env.storage().instance().set(&soroban_sdk::symbol_short!("pflag"), &bitmask);
+}
+
+/// Returns `Err(InsufficientFunds)` if `amount` is not strictly positive (≤ 0).
+/// Use this for all numeric inputs that must be > 0 (stakes, loan amounts, thresholds).
+pub fn require_positive_amount(_env: &Env, amount: i128) -> Result<(), ContractError> {
+    if amount <= 0 {
+        return Err(ContractError::InsufficientFunds);
+    }
+    Ok(())
+}
+
+pub fn config(env: &Env) -> Config {
+    env.storage()
+        .instance()
+        .get(&DataKey::Config)
+        .expect("not initialized")
+}
+
+pub fn add_slash_balance(env: &Env, amount: i128) {
+    let current: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::SlashTreasury)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&DataKey::SlashTreasury, &(current + amount));
+}
+
+/// Issue 112: Get current slash balance to prevent it from being used for yield payouts.
+pub fn get_slash_balance(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::SlashTreasury)
+        .unwrap_or(0)
+}
+
+pub fn has_active_loan(env: &Env, borrower: &Address) -> bool {
+    matches!(get_active_loan_record(env, borrower), Ok(loan) if loan.status == crate::types::LoanStatus::Active)
+}
+
+pub fn next_loan_id(env: &Env) -> u64 {
+    let loan_id = env
+        .storage()
+        .instance()
+        .get(&DataKey::LoanCounter)
+        .unwrap_or(0u64)
+        .checked_add(1)
+        .expect("loan ID overflow");
+    env.storage()
+        .instance()
+        .set(&DataKey::LoanCounter, &loan_id);
+    loan_id
+}
+
+pub fn get_latest_loan_record(env: &Env, borrower: &Address) -> Option<LoanRecord> {
+    // Get the latest loan ID for the borrower
+    if let Some(loan_id) = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LatestLoan(borrower.clone()))
+    {
+        env.storage().persistent().get(&DataKey::Loan(loan_id))
+    } else {
+        None
+    }
+}
+
+/// Validates that a loan record is in Active status.
+/// Returns `Err(AlreadyRepaid)` for repaid loans, `Err(NoActiveLoan)` for other non-active loans.
+pub fn validate_loan_active(loan: &LoanRecord) -> Result<(), ContractError> {
+    if loan.status != crate::types::LoanStatus::Active {
+        if loan.status == crate::types::LoanStatus::Repaid {
+            return Err(ContractError::AlreadyRepaid);
+        } else {
+            return Err(ContractError::NoActiveLoan);
+        }
+    }
+    Ok(())
+}
+
+pub fn get_active_loan_record(env: &Env, borrower: &Address) -> Result<LoanRecord, ContractError> {
+    let loan_id: u64 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ActiveLoan(borrower.clone()))
+        .ok_or(ContractError::NoActiveLoan)?;
+    env.storage()
+        .persistent()
+        .get(&DataKey::Loan(loan_id))
+        .ok_or(ContractError::NoActiveLoan)
+}
+
+pub fn token(env: &Env) -> token::Client<'_> {
+    let addr = config(env).token;
+    token::Client::new(env, &addr)
+}
+
+pub fn token_client(env: &Env) -> token::Client<'_> {
+    token(env)
+}
+
+/// Returns a token client for `addr` after verifying it is an allowed token
+/// (either the primary protocol token or in `Config.allowed_tokens`).
+pub fn require_allowed_token<'a>(
+    env: &'a Env,
+    addr: &Address,
+) -> Result<token::Client<'a>, ContractError> {
+    let cfg = config(env);
+    if *addr == cfg.token || cfg.allowed_tokens.iter().any(|t| t == *addr) {
+        Ok(token::Client::new(env, addr))
+    } else {
+        Err(ContractError::InvalidToken)
+    }
+}
+
+pub fn require_admin_approval(env: &Env, admin_signers: &Vec<Address>) {
+    let config = config(env);
+    assert!(
+        admin_signers.len() >= config.admin_threshold,
+        "insufficient admin approvals"
+    );
+    for signer in admin_signers.iter() {
+        assert!(
+            config.admins.iter().any(|a| a == signer),
+            "signer is not a registered admin"
+        );
+        // Check if admin key is expired
+        assert!(
+            !crate::admin::is_admin_key_expired(env, &signer),
+            "admin key has expired"
+        );
+        signer.require_auth();
+    }
+}
+
+/// Validates that an address is not a zero address
+pub fn require_valid_address(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    if is_zero_address(env, addr) {
+        Err(ContractError::ZeroAddress)
+    } else {
+        Ok(())
+    }
+}
+
+/// Validates that an address implements the SEP-41 token interface by attempting
+/// to call `balance()` on it. A plain account address will cause a host trap,
+/// which we catch via `try_invoke` semantics using the token client's try_ variant.
+pub fn require_valid_token(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    require_valid_address(env, addr)?;
+    // Attempt to call balance() on the address. If it's not a token contract,
+    // the invocation will fail and we return InvalidToken.
+    let client = token::Client::new(env, addr);
+    // Use a dummy address (the contract itself) — we only care whether the call
+    // succeeds, not the returned value.
+    let probe = env.current_contract_address();
+    if client.try_balance(&probe).is_err() {
+        return Err(ContractError::InvalidToken);
+    }
+    Ok(())
+}
+
+/// Check if a caller has been delegated a specific permission (#684)
+pub fn has_delegated_permission(env: &Env, caller: &Address, permission: &soroban_sdk::String) -> bool {
+    if let Some(record) = env.storage().persistent()
+        .get::<_, crate::types::AdminDelegationRecord>(&crate::types::DataKey::AdminDelegation(caller.clone())) {
+        record.permissions.iter().any(|p| p == *permission)
+    } else {
+        false
+    }
+}
+
+/// Compute `amount * bps / 10_000` — basis-point math helper.
+pub fn bps_of(amount: i128, bps: i128) -> i128 {
+    amount * bps / 10_000
+}
+
+/// Compute the effective (decayed) stake for a vouch.
+///
+/// If `decay_rate_bps == 0` or `decay_period_secs == 0` decay is disabled and
+/// the original `stake` is returned unchanged.
+///
+/// Otherwise, for each full `decay_period_secs` elapsed since `vouch_timestamp`,
+/// the stake is reduced by `decay_rate_bps / 10_000`. The minimum returned value
+/// is 0 (stake never goes negative).
+///
+/// Example: stake=1_000_000, decay_rate_bps=100 (1%), decay_period_secs=30 days.
+/// After 1 period → 990_000. After 2 periods → 980_100. Etc.
+pub fn compute_decayed_stake(
+    stake: i128,
+    vouch_timestamp: u64,
+    now: u64,
+    decay_rate_bps: u32,
+    decay_period_secs: u64,
+) -> i128 {
+    if decay_rate_bps == 0 || decay_period_secs == 0 || now <= vouch_timestamp {
+        return stake;
+    }
+    let elapsed = now - vouch_timestamp;
+    let periods = elapsed / decay_period_secs;
+    if periods == 0 {
+        return stake;
+    }
+    // Apply compound decay: stake * ((10_000 - decay_rate_bps) / 10_000) ^ periods
+    // Use integer arithmetic: multiply by (10_000 - rate) and divide by 10_000 each period.
+    let keep_bps = (10_000u64 - decay_rate_bps as u64) as i128;
+    let mut result = stake;
+    for _ in 0..periods {
+        result = result * keep_bps / 10_000;
+        if result <= 0 {
+            return 0;
+        }
+    }
+    result
+}
+
+pub fn validate_admin_config(
+    env: &Env,
+    admins: &Vec<Address>,
+    admin_threshold: u32,
+) -> Result<(), ContractError> {
+    assert!(!admins.is_empty(), "at least one admin is required");
+    if admin_threshold == 0 || admin_threshold > admins.len() {
+        return Err(ContractError::InvalidAdminThreshold);
+    }
+
+    let admin_count = admins.len();
+    for i in 0..admin_count {
+        let admin = admins.get(i).unwrap();
+
+        // Validate admin address is not zero
+        require_valid_address(env, &admin)?;
+
+        // Check for duplicates
+        for j in 0..i {
+            let prior_admin = admins.get(j).unwrap();
+            assert!(admin != prior_admin, "duplicate admin");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod ttl_tests {
+    use super::*;
+    use crate::{QuorumCreditContract, QuorumCreditContractClient};
+    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+
+    /// Verify extend_ttl does not panic when called on an existing persistent key.
+    #[test]
+    fn test_extend_ttl_does_not_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        let deployer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        client.initialize(&deployer, &admins, &1, &token);
+
+        // Write a persistent key then call extend_ttl — must not panic.
+        env.as_contract(&contract_id, || {
+            let key = DataKey::LoanCount(deployer.clone());
+            env.storage().persistent().set(&key, &42u32);
+            extend_ttl(&env, &key);
+        });
+    }
+}
