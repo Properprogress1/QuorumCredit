@@ -78,6 +78,16 @@ pub const DEFAULT_LIQUIDITY_MINING_RATE_BPS: u32 = 50;
 /// Default dynamic slash threshold setting (false = disabled by default).
 pub const DEFAULT_DYNAMIC_SLASH_THRESHOLD: bool = false;
 
+/// Default loan-size-based slash scaling setting (false = disabled by default).
+pub const DEFAULT_LOAN_SIZE_SLASH_ENABLED: bool = false;
+
+/// Default maximum slash rate for the largest loans, in basis points (8000 = 80%).
+/// When loan-size scaling is enabled, slash_bps is the floor (small loans) and
+/// this is the ceiling (loans at or above the total staked collateral).
+pub const DEFAULT_LOAN_SIZE_SLASH_MAX_BPS: i128 = 8_000;
+
+/// Default borrower repayment confirmation requirement (false = disabled by default).
+pub const DEFAULT_CONFIRMATION_REQUIRED: bool = false;
 /// Timelock delay for decrease_stake during an active loan, in seconds (7 days).
 pub const DECREASE_STAKE_TIMELOCK: u64 = 7 * 24 * 60 * 60;
 
@@ -108,6 +118,12 @@ pub const HEALTH_THRESHOLD_BPS: i128 = 8_000;
 /// Default slash delay period to allow for disputes, in seconds (7 days).
 pub const DEFAULT_SLASH_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+/// Duration of one reporting month, in seconds (30 days).
+pub const MONTHLY_PERIOD_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Default premium rate for slashing insurance opt-in, in basis points (100 = 1%).
+pub const DEFAULT_INSURANCE_PREMIUM_BPS: u32 = 100;
+
 // ── Loan Extension ────────────────────────────────────────────────────────────
 
 /// A pending loan extension request. Created by the borrower; approved by vouchers.
@@ -131,6 +147,22 @@ pub struct LoanExtensionRequest {
 }
 /// Slash escrow period before funds are permanently burned, in seconds (30 days).
 pub const SLASH_ESCROW_PERIOD: u64 = 30 * 24 * 60 * 60;
+
+// ── Escrow Status ─────────────────────────────────────────────────────────────
+
+/// Status of a repayment held in oracle-verified escrow (#666/#667).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    /// No escrow — repayment released immediately (default).
+    None,
+    /// Repayment held pending oracle verification.
+    Pending,
+    /// Oracle approved — funds released to vouchers.
+    Released,
+    /// Oracle rejected — funds returned to borrower.
+    Rejected,
+}
 
 // ── Loan Status ───────────────────────────────────────────────────────────────
 
@@ -253,8 +285,13 @@ pub enum DataKey {
     ExternalCreditScore(Address),
     // #666: Escrowed repayment amount per borrower (held pending oracle verification)
     EscrowAmount(Address),
-    // #704: Managed derived key storage
-    ManagedKey(soroban_sdk::BytesN<32>),
+    /// Monthly slashing transparency report: month_id → SlashingReportRecord.
+    /// month_id = unix_timestamp / MONTHLY_PERIOD_SECS
+    SlashingReport(u64),
+    /// Per-vouch insurance opt-in: (voucher, borrower) → bool (insured).
+    VoucherInsurance(Address, Address),
+    /// Cross-chain bridge validation status: (voucher, chain_id) → bool.
+    BridgeValidated(Address, u32),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -345,8 +382,14 @@ pub struct Config {
     pub voting_period_seconds: u64,
     /// Minimum seconds between slashes for the same borrower (0 = disabled).
     pub slash_cooldown_seconds: u64,
-    /// When true, critical write paths are blocked until multi-sig emergency unpause.
+        /// When true, critical write paths are blocked until multi-sig emergency unpause.
     pub emergency_pause_enabled: bool,
+    /// Issue #668: Discount applied to yield on early repayment, in basis points (0 = no discount).
+    pub early_repayment_discount_bps: u32,
+    /// Issue #666/#667: Optional oracle contract address for repayment verification.
+    pub oracle_address: Option<soroban_sdk::Address>,
+    /// Delay (in seconds) after a slash vote reaches quorum before it can be executed (0 = immediate).
+    pub slash_delay_seconds: u64,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -401,6 +444,10 @@ pub struct LoanRecord {
     /// For variable-rate loans: the oracle key or index name used to look up the
     /// current rate (e.g. `"SOFR"`, `"PRIME"`). `None` for fixed-rate loans.
     pub index_reference: Option<soroban_sdk::String>,
+    /// Issue #666/#667: Escrow status for oracle-verified repayments.
+    pub escrow_status: EscrowStatus,
+    /// Issue #669: Retry count for failed repayments (max 3).
+    pub retry_count: u32,
 }
 
 /// A single payment event recorded against a loan.
@@ -493,6 +540,41 @@ pub enum TimelockAction {
     SetConfig(Config),
 }
 
+/// Escrow state for a repayment pending oracle verification.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    /// No escrow in flight (default).
+    None,
+    /// Repayment held pending oracle approval.
+    Pending,
+    /// Oracle approved — funds released to vouchers.
+    Released,
+    /// Oracle rejected — funds returned to borrower.
+    Rejected,
+}
+
+/// A slash execution that has been approved by governance but is waiting for
+/// its `executable_at` delay to elapse before it can be carried out.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingSlashRecord {
+    pub borrower: Address,
+    pub approved_at: u64,
+    pub executable_at: u64,
+    pub executed: bool,
+}
+
+/// Controls where redistributable slash funds flow after insurance allocation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RedistributionRule {
+    /// Route to the slash treasury (default).
+    Treasury,
+    /// Redistribute pro-rata to remaining active vouchers of the borrower.
+    Vouchers,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct SlashRecord {
@@ -510,6 +592,22 @@ pub struct SlashRecord {
     pub reversed: bool,
 }
 
+/// Monthly aggregated report of all slashing events.
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashingReportRecord {
+    /// Month identifier: unix_timestamp / MONTHLY_PERIOD_SECS.
+    pub month_id: u64,
+    /// Total number of slash events in this month.
+    pub total_slashes: u32,
+    /// Total amount slashed across all events, in stroops.
+    pub total_slashed: i128,
+    /// Number of slashes subsequently reversed by admins.
+    pub total_reversed: u32,
+    /// Slash IDs recorded during this month.
+    pub slash_ids: Vec<u64>,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct WithdrawalRequest {
@@ -517,6 +615,21 @@ pub struct WithdrawalRequest {
     pub borrower: Address,
     pub token: Address,
     pub requested_at: u64,
+}
+
+/// A pending slash awaiting execution after the mandatory delay period.
+/// Created when a slash vote reaches quorum; executed via `execute_pending_slash`.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingSlashRecord {
+    /// Borrower subject to the pending slash.
+    pub borrower: soroban_sdk::Address,
+    /// Ledger timestamp when the slash vote was approved.
+    pub approved_at: u64,
+    /// Earliest ledger timestamp at which the slash may be executed.
+    pub executable_at: u64,
+    /// True once the slash has been executed.
+    pub executed: bool,
 }
 
 /// A queued withdrawal request submitted during an active loan.
@@ -611,20 +724,6 @@ pub struct VoucherStats {
     pub total_slashed: i128,
 }
 
-// ── Issue #635: Vouch Snapshot ────────────────────────────────────────────────
-
-/// A single entry in a governance vouch snapshot.
-#[contracttype]
-#[derive(Clone)]
-pub struct VouchSnapshotEntry {
-    /// The borrower whose vouches are snapshotted.
-    pub borrower: Address,
-    /// Total stake vouched for this borrower at snapshot time, in stroops.
-    pub total_stake: i128,
-    /// Number of active vouchers at snapshot time.
-    pub voucher_count: u32,
-}
-
 // ── Pause Mode ────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -647,8 +746,6 @@ pub struct ThawState {
 
 /// Epoch duration for liquidity mining rewards (7 days).
 pub const LIQUIDITY_MINING_EPOCH_SECS: u64 = 7 * 24 * 60 * 60;
-/// Default liquidity mining rate: 50 bps = 0.5% per epoch.
-pub const DEFAULT_LIQUIDITY_MINING_RATE_BPS: u32 = 50;
 
 // ── #635: Vouch Snapshot for Governance ──────────────────────────────────────
 

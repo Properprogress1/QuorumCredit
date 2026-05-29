@@ -67,6 +67,10 @@ impl QuorumCreditContract {
                 recovery_percentage: 0,
                 redistribution_rule: RedistributionRule::Treasury,
                 immunity_period_seconds: 0,
+                insurance_premium_bps: 0,
+                voting_period_seconds: crate::types::DEFAULT_VOTING_PERIOD_SECONDS,
+                slash_cooldown_seconds: 0,
+                emergency_pause_enabled: false,
             },
         );
 
@@ -714,6 +718,42 @@ impl QuorumCreditContract {
         admin::get_effective_slash_threshold(env)
     }
 
+    /// Toggle loan-size-based slash scaling on/off.
+    /// When enabled, slash percentage scales linearly with loan size relative to
+    /// total staked collateral. Small loans use `slash_bps`; large loans scale up
+    /// to `loan_size_slash_max_bps`.
+    ///
+    /// # Arguments
+    /// * `admin_signers` - Vector of admin addresses (must meet threshold)
+    /// * `enabled` - Whether to enable loan-size-based slash scaling
+    ///
+    /// # Panics
+    /// * If admin approval is insufficient
+    pub fn set_loan_size_slash_enabled(
+        env: Env,
+        admin_signers: Vec<Address>,
+        enabled: bool,
+    ) {
+        admin::set_loan_size_slash_enabled(env, admin_signers, enabled)
+    }
+
+    /// Set the maximum slash rate for the largest loans when loan-size scaling is enabled.
+    ///
+    /// # Arguments
+    /// * `admin_signers` - Vector of admin addresses (must meet threshold)
+    /// * `max_bps` - Maximum slash rate in basis points (must be >= slash_bps, <= 10_000)
+    ///
+    /// # Panics
+    /// * If admin approval is insufficient
+    /// * If max_bps < slash_bps or max_bps > 10_000
+    pub fn set_loan_size_slash_max_bps(
+        env: Env,
+        admin_signers: Vec<Address>,
+        max_bps: i128,
+    ) {
+        admin::set_loan_size_slash_max_bps(env, admin_signers, max_bps)
+    }
+
     /// Set the reputation NFT contract address.
     ///
     /// # Arguments
@@ -862,7 +902,7 @@ impl QuorumCreditContract {
             .get(&DataKey::FeeTreasury);
         match fee_treasury {
             Some(address) => {
-                let token_client = helpers::token(&env);
+                let token_client = helpers::primary_token(&env);
                 token_client.balance(&address)
             }
             None => 0,
@@ -1066,7 +1106,7 @@ impl QuorumCreditContract {
     /// # Returns
     /// * `i128` - The contract balance in stroops
     pub fn get_contract_balance(env: Env) -> i128 {
-        helpers::token(&env).balance(&env.current_contract_address())
+        helpers::primary_token(&env).balance(&env.current_contract_address())
     }
 
     /// Get the voucher history (list of borrowers vouched for).
@@ -1674,5 +1714,50 @@ impl QuorumCreditContract {
 
     pub fn is_high_fraud_risk(env: Env, voucher: Address) -> bool {
         fraud_detection::is_high_fraud_risk(env, voucher)
+    }
+
+    // ── Slashing Transparency Report ──────────────────────────────────────────
+
+    /// Generate (or refresh) the monthly slashing report for `month_id`.
+    ///
+    /// `month_id` = `unix_timestamp / MONTHLY_PERIOD_SECS` (30-day periods).
+    /// Scans all slash records and aggregates those within the requested month.
+    pub fn generate_slashing_report(env: Env, month_id: u64) -> SlashingReportRecord {
+        governance::generate_slashing_report(env, month_id)
+    }
+
+    /// Return the cached slashing report for `month_id`, or `None` if not yet generated.
+    pub fn get_slashing_report(env: Env, month_id: u64) -> Option<SlashingReportRecord> {
+        governance::get_slashing_report(env, month_id)
+    }
+
+    // ── Slashing Insurance ────────────────────────────────────────────────────
+
+    /// Opt a vouch into slashing insurance by paying the protocol premium.
+    ///
+    /// Premium = `stake * Config.insurance_premium_bps / 10_000`, added to the
+    /// insurance pool. Once insured, the voucher may claim from the pool on default.
+    /// Returns the premium amount paid in stroops.
+    pub fn purchase_slash_insurance(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+    ) -> Result<i128, ContractError> {
+        insurance::purchase_slash_insurance(env, voucher, borrower)
+    }
+
+    /// Returns true if the voucher has purchased slashing insurance for this borrower.
+    pub fn is_voucher_insured(env: Env, voucher: Address, borrower: Address) -> bool {
+        insurance::is_voucher_insured(env, voucher, borrower)
+    }
+
+    /// Get the current insurance fee in basis points.
+    pub fn get_insurance_fee_bps(env: Env) -> u32 {
+        insurance::get_insurance_fee_bps_pub(env)
+    }
+
+    /// Get the current insurance coverage cap in basis points.
+    pub fn get_insurance_coverage_bps(env: Env) -> u32 {
+        insurance::get_insurance_coverage_bps_pub(env)
     }
 }

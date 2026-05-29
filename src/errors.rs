@@ -53,7 +53,7 @@ pub enum ContractError {
     /// Basis points value is invalid (must be 0–10000).
     InvalidBps = 46,
     /// Withdrawal request already queued for this voucher/borrower pair.
-    WithdrawalAlreadyQueued = 46,
+    WithdrawalAlreadyQueued = 57,
     /// No queued withdrawal found for this voucher/borrower pair.
     WithdrawalNotQueued = 47,
     /// Partial withdrawal amount exceeds the 50% cap.
@@ -68,4 +68,14 @@ pub enum ContractError {
     ProposalNotFound = 52,
     /// Governance proposal was already finalized.
     ProposalAlreadyFinalized = 53,
+    /// Oracle caller is not the registered oracle contract (#666/#667).
+    OracleUnauthorized = 54,
+    /// Repayment retry limit has been exceeded (#669).
+    MaxRetriesExceeded = 55,
+    /// No escrow record found for this borrower (#666/#667).
+    NoEscrowFound = 56,
+    /// No slash record found for the given slash ID.
+    SlashRecordNotFound = 57,
+    /// Slash has already been reversed and cannot be reversed again.
+    SlashAlreadyReversed = 58,
 }

@@ -194,6 +194,83 @@ pub fn claim_insurance(
     Ok(())
 }
 
+// ── Slashing Insurance Opt-in ─────────────────────────────────────────────────
+
+/// Opt a vouch into slashing insurance by paying the configured premium.
+///
+/// The premium is `stake * insurance_premium_bps / 10_000` and is immediately
+/// added to the insurance pool. Once a vouch is insured, the voucher is
+/// eligible for insurance payouts regardless of the pool's general coverage cap.
+///
+/// Returns `Ok(premium_paid)` on success.
+pub fn purchase_slash_insurance(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+) -> Result<i128, ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+
+    // Verify the vouch exists.
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower.clone()))
+        .unwrap_or(Vec::new(&env));
+
+    let vouch = vouches
+        .iter()
+        .find(|v| v.voucher == voucher)
+        .ok_or(ContractError::VoucherNotFound)?;
+
+    // Already insured — idempotent no-op.
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::VoucherInsurance(voucher.clone(), borrower.clone()))
+    {
+        return Ok(0);
+    }
+
+    let cfg = config(&env);
+    let premium_bps = cfg.insurance_premium_bps as i128;
+    if premium_bps == 0 {
+        // Insurance is free — mark as insured without charging.
+        env.storage()
+            .persistent()
+            .set(&DataKey::VoucherInsurance(voucher.clone(), borrower.clone()), &true);
+        return Ok(0);
+    }
+
+    let premium = vouch.stake * premium_bps / BPS_DENOMINATOR;
+    if premium <= 0 {
+        return Err(ContractError::InvalidAmount);
+    }
+
+    let token_client = token::Client::new(&env, &vouch.token);
+    token_client.transfer(&voucher, &env.current_contract_address(), &premium);
+
+    add_to_pool(&env, premium);
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::VoucherInsurance(voucher.clone(), borrower.clone()), &true);
+
+    env.events().publish(
+        (symbol_short!("ins"), symbol_short!("premm")),
+        (voucher, borrower, premium),
+    );
+
+    Ok(premium)
+}
+
+/// Returns true if the voucher has purchased slashing insurance for this borrower.
+pub fn is_voucher_insured(env: Env, voucher: Address, borrower: Address) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::VoucherInsurance(voucher, borrower))
+}
+
 // ── Governance ────────────────────────────────────────────────────────────────
 
 /// Set the protocol insurance fee in basis points (admin-only).

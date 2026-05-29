@@ -312,6 +312,53 @@ pub fn get_effective_slash_threshold(env: Env) -> i128 {
     crate::helpers::calculate_dynamic_slash_threshold(&env)
 }
 
+/// Toggle loan-size-based slash scaling on/off.
+/// When enabled, the slash percentage scales linearly with loan size relative to
+/// total staked collateral: small loans use `slash_bps`, large loans scale up to
+/// `loan_size_slash_max_bps`.
+pub fn set_loan_size_slash_enabled(
+    env: Env,
+    admin_signers: Vec<Address>,
+    enabled: bool,
+) {
+    require_admin_approval(&env, &admin_signers);
+
+    let mut cfg = config(&env);
+    cfg.loan_size_slash_enabled = enabled;
+
+    env.storage().instance().set(&DataKey::Config, &cfg);
+    env.events().publish(
+        (symbol_short!("admin"), symbol_short!("lsslash")),
+        (admin_signers.get(0).unwrap(), enabled, env.ledger().timestamp()),
+    );
+}
+
+/// Set the maximum slash rate applied to the largest loans when loan-size scaling is enabled.
+/// Must be >= the current slash_bps and <= 10_000 (100%).
+pub fn set_loan_size_slash_max_bps(
+    env: Env,
+    admin_signers: Vec<Address>,
+    max_bps: i128,
+) {
+    require_admin_approval(&env, &admin_signers);
+
+    let cfg = config(&env);
+    assert!(
+        max_bps >= cfg.slash_bps,
+        "loan_size_slash_max_bps must be >= slash_bps"
+    );
+    assert!(max_bps <= 10_000, "loan_size_slash_max_bps cannot exceed 100%");
+
+    let mut updated = cfg;
+    updated.loan_size_slash_max_bps = max_bps;
+
+    env.storage().instance().set(&DataKey::Config, &updated);
+    env.events().publish(
+        (symbol_short!("admin"), symbol_short!("lsmaxbps")),
+        (admin_signers.get(0).unwrap(), max_bps, env.ledger().timestamp()),
+    );
+}
+
 pub fn set_reputation_nft(env: Env, admin_signers: Vec<Address>, nft_contract: Address) {
     require_admin_approval(&env, &admin_signers);
     env.storage()
@@ -904,4 +951,24 @@ pub fn emergency_unpause(env: Env, admin_signers: Vec<Address>) -> Result<(), Co
     );
 
     Ok(())
+}
+
+/// Toggle the borrower repayment confirmation requirement on/off.
+/// When enabled, borrowers must call `confirm_repayment` before `repay`.
+/// When disabled (default), `repay` works without any prior confirmation.
+pub fn set_confirmation_required(
+    env: Env,
+    admin_signers: Vec<Address>,
+    enabled: bool,
+) {
+    require_admin_approval(&env, &admin_signers);
+
+    let mut cfg = config(&env);
+    cfg.confirmation_required = enabled;
+
+    env.storage().instance().set(&DataKey::Config, &cfg);
+    env.events().publish(
+        (symbol_short!("admin"), symbol_short!("cnf_req")),
+        (admin_signers.get(0).unwrap(), enabled, env.ledger().timestamp()),
+    );
 }
