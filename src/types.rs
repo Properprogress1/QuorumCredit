@@ -86,6 +86,8 @@ pub const DEFAULT_LOAN_SIZE_SLASH_ENABLED: bool = false;
 /// this is the ceiling (loans at or above the total staked collateral).
 pub const DEFAULT_LOAN_SIZE_SLASH_MAX_BPS: i128 = 8_000;
 
+/// Default borrower repayment confirmation requirement (false = disabled by default).
+pub const DEFAULT_CONFIRMATION_REQUIRED: bool = false;
 /// Timelock delay for decrease_stake during an active loan, in seconds (7 days).
 pub const DECREASE_STAKE_TIMELOCK: u64 = 7 * 24 * 60 * 60;
 
