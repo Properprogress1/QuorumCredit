@@ -62,8 +62,8 @@ fn record_vouch_graph(env: &Env, voucher: Address, borrower: Address) {
     // Depth 1 means direct vouch
     env.storage()
         .persistent()
-        .set(&DataKey::VouchGraph(voucher.clone(), borrower.clone()), &1u32);
-    extend_ttl(env, &DataKey::VouchGraph(voucher, borrower));
+        .set(&DataKey::VouchGraph(crate::types::VouchGraphKey { voucher: voucher.clone(), borrower: borrower.clone() }), &1u32);
+    extend_ttl(env, &DataKey::VouchGraph(crate::types::VouchGraphKey { voucher, borrower }));
 }
 
 pub fn vouch(
@@ -217,16 +217,12 @@ fn do_vouch(
     if let Some(limit) = env
         .storage()
         .persistent()
-        .get::<DataKey, i128>(&DataKey::VoucherStakeLimit(voucher.clone(), borrower.clone()))
+        .get::<DataKey, i128>(&DataKey::VoucherStakeLimit(crate::types::VoucherStakeLimitKey { voucher: voucher.clone(), borrower: borrower.clone() }))
     {
         if stake > limit {
             return Err(ContractError::StakeLimitExceeded);
         }
     }
-
-    // NOTE: cooldown is enforced by the caller (vouch / batch_vouch) once per
-    // transaction, not here, so that batch_vouch cannot bypass it by resetting
-    // the timestamp on every iteration within the same ledger.
 
     let mut vouches: Vec<VouchRecord> = env
         .storage()
@@ -234,17 +230,52 @@ fn do_vouch(
         .get(&DataKey::Vouches(borrower.clone()))
         .unwrap_or(Vec::new(env));
 
-    // Reject duplicate vouch (same voucher + same token) before any state mutation or transfer.
+    // Reject duplicate vouch (same voucher + same token) before cooldown check.
     for v in vouches.iter() {
         if v.voucher == voucher && v.token == token {
             return Err(ContractError::DuplicateVouch);
         }
     }
 
+    // Rate limiting: enforce cooldown between vouch calls from the same address.
+    let now = env.ledger().timestamp();
+    let last: u64 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LastVouchTimestamp(voucher.clone()))
+        .unwrap_or(u64::MAX); // u64::MAX means "never vouched"
+    if last != u64::MAX && now < last + crate::types::DEFAULT_VOUCH_COOLDOWN_SECS {
+        return Err(ContractError::VouchCooldownActive);
+    }
+
     // Reject vouch if the borrower already has an active loan — the stake
     // would be locked with no effect on the existing loan (fixes issue #13).
     if has_active_loan(env, &borrower) {
         return Err(ContractError::ActiveLoanExists);
+    }
+
+    // Issue #639: Vouch Conflict Detection — count how many active-loan borrowers
+    // this voucher already backs. If it meets or exceeds conflict_threshold, reject.
+    let conflict_threshold: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ConflictThreshold)
+        .unwrap_or(0u32);
+    if conflict_threshold > 0 {
+        let history: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoucherHistory(voucher.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut active_count: u32 = 0;
+        for backed in history.iter() {
+            if crate::helpers::has_active_loan(env, &backed) {
+                active_count += 1;
+            }
+        }
+        if active_count >= conflict_threshold {
+            return Err(ContractError::VouchConflictDetected);
+        }
     }
 
     // Task 3: Detect circular vouching patterns before processing
@@ -352,7 +383,7 @@ pub fn increase_stake(
     if let Some(limit) = env
         .storage()
         .persistent()
-        .get::<DataKey, i128>(&DataKey::VoucherStakeLimit(voucher.clone(), borrower.clone()))
+        .get::<DataKey, i128>(&DataKey::VoucherStakeLimit(crate::types::VoucherStakeLimitKey { voucher: voucher.clone(), borrower: borrower.clone() }))
     {
         if vouch_rec.amount + additional > limit {
             return Err(ContractError::StakeLimitExceeded);
@@ -406,6 +437,19 @@ pub fn decrease_stake(
         "decrease amount exceeds staked amount"
     );
 
+    // Issue #640: Enforce minimum vouch duration before stake reduction.
+    let min_vouch_dur: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::MinVouchDurationSeconds)
+        .unwrap_or(0u64);
+    if min_vouch_dur > 0 {
+        let age = env.ledger().timestamp().saturating_sub(vouch_rec.vouch_timestamp);
+        if age < min_vouch_dur {
+            return Err(ContractError::VouchTooYoungToWithdraw);
+        }
+    }
+
     let token_client = require_allowed_token(&env, &vouch_rec.token)?;
     vouch_rec.amount -= amount;
     if vouch_rec.amount == 0 {
@@ -451,6 +495,20 @@ pub fn withdraw_vouch(env: Env, voucher: Address, borrower: Address) -> Result<(
     let vouch_rec = vouches.get(idx).unwrap();
     let stake = vouch_rec.amount;
     let token_addr = vouch_rec.token.clone();
+
+    // Issue #640: Enforce minimum vouch duration before withdrawal.
+    let min_vouch_dur: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::MinVouchDurationSeconds)
+        .unwrap_or(0u64);
+    if min_vouch_dur > 0 {
+        let age = env.ledger().timestamp().saturating_sub(vouch_rec.vouch_timestamp);
+        if age < min_vouch_dur {
+            return Err(ContractError::VouchTooYoungToWithdraw);
+        }
+    }
+
     vouches.remove(idx);
 
     if vouches.is_empty() {
@@ -604,44 +662,96 @@ pub fn voucher_history(env: Env, voucher: Address) -> Vec<Address> {
         .unwrap_or(Vec::new(&env))
 }
 
-/// Reset the `vouch_timestamp` on an existing vouch to the current ledger time,
-/// restarting the decay clock. The voucher must sign the transaction.
-/// Cannot be called while the borrower has an active loan.
-pub fn refresh_vouch(
+/// Issue #638: Create a vouch pool for a borrower. Returns the new pool_id.
+pub fn create_vouch_pool(env: Env, creator: Address, borrower: Address) -> u64 {
+    creator.require_auth();
+    require_not_paused(&env).expect("contract paused");
+
+    let pool_id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::VouchPoolCounter)
+        .unwrap_or(0u64)
+        + 1;
+    env.storage()
+        .instance()
+        .set(&DataKey::VouchPoolCounter, &pool_id);
+
+    let pool = crate::types::VouchPool {
+        pool_id,
+        borrower,
+        members: {
+            let mut m = Vec::new(&env);
+            m.push_back(creator);
+            m
+        },
+        created_at: env.ledger().timestamp(),
+    };
+    env.storage()
+        .persistent()
+        .set(&DataKey::VouchPool(pool_id), &pool);
+    extend_ttl(&env, &DataKey::VouchPool(pool_id));
+
+    pool_id
+}
+
+/// Issue #638: Join an existing vouch pool. The voucher's VouchRecord pool_id is updated.
+pub fn join_vouch_pool(
     env: Env,
     voucher: Address,
     borrower: Address,
+    pool_id: u64,
 ) -> Result<(), ContractError> {
     voucher.require_auth();
     require_not_paused(&env)?;
 
+    let mut pool: crate::types::VouchPool = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VouchPool(pool_id))
+        .expect("pool not found");
+
+    assert!(pool.borrower == borrower, "pool borrower mismatch");
+
+    // Add member if not already present
+    if !pool.members.iter().any(|m| m == voucher) {
+        pool.members.push_back(voucher.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::VouchPool(pool_id), &pool);
+        extend_ttl(&env, &DataKey::VouchPool(pool_id));
+    }
+
+    // Update the voucher's VouchRecord to reference this pool
     let mut vouches: Vec<VouchRecord> = env
         .storage()
         .persistent()
         .get(&DataKey::Vouches(borrower.clone()))
-        .ok_or(ContractError::NoVouchesForBorrower)?;
+        .unwrap_or(Vec::new(&env));
 
-    let idx = vouches
-        .iter()
-        .position(|v| v.voucher == voucher)
-        .ok_or(ContractError::VoucherNotFound)? as u32;
-
-    let mut record = vouches.get(idx).unwrap();
-    record.vouch_timestamp = env.ledger().timestamp();
-    vouches.set(idx, record);
-
+    for i in 0..vouches.len() {
+        let mut rec = vouches.get(i).unwrap();
+        if rec.voucher == voucher {
+            rec.pool_id = Some(pool_id);
+            vouches.set(i, rec);
+            break;
+        }
+    }
     env.storage()
         .persistent()
         .set(&DataKey::Vouches(borrower.clone()), &vouches);
-    extend_ttl(&env, &DataKey::Vouches(borrower.clone()));
-
-    env.events().publish(
-        (symbol_short!("vouch"), symbol_short!("refresh")),
-        (voucher, borrower),
-    );
+    extend_ttl(&env, &DataKey::Vouches(borrower));
 
     Ok(())
 }
+
+/// Issue #638: Get a vouch pool by id.
+pub fn get_vouch_pool(env: Env, pool_id: u64) -> Option<crate::types::VouchPool> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::VouchPool(pool_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
