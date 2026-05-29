@@ -28,6 +28,8 @@ This platform is designed for developers building on Stellar, fintech teams targ
 - [Setup Instructions](#setup-instructions)
 - [Testing](#testing)
 - [Deployment](#deployment)
+- [Security Best Practices](SECURITY_BEST_PRACTICES.md)
+- [Documentation](#documentation)
 - [Architecture](#architecture)
 - [Error Reference](#error-reference)
 - [Contributing](#contributing)
@@ -262,6 +264,14 @@ Step 3: Initialize the contract ← SAME deployer keypair must sign this tx
 
 If steps 2 and 3 are not signed by the same keypair, `initialize` will panic and the contract remains uninitialized.
 
+## Documentation
+
+Project reference documentation is generated automatically from the Rust workspace and published to GitHub Pages on every merge to `main`.
+
+Visit the published docs at:
+
+https://ndifreke000.github.io/QuorumCredit/
+
 ### Deploy to Testnet
 
 ```bash
@@ -492,6 +502,473 @@ All contract errors are defined in `src/errors.rs` as the `ContractError` enum. 
 | 34 | `AlreadyRepaid` | `repay` called on a loan that has already been fully repaid. | No action needed; the loan is closed. |
 
 > Errors with codes 9–12 (`PoolLengthMismatch`, `PoolEmpty`, `PoolBorrowerActiveLoan`, `PoolInsufficientFunds`) and 21–23 (`VouchCooldownActive`, `BorrowerHasActiveLoan`, `VoucherNotWhitelisted`) are reserved for pool and whitelist features currently under development.
+
+---
+
+## API Reference
+
+This section provides comprehensive documentation for all public functions, storage keys, events, and data structures in the QuorumCredit smart contract.
+
+### Public Functions
+
+#### Initialization & Admin
+
+##### `initialize(deployer, admins, admin_threshold, token)`
+**Signature**: `fn initialize(env: Env, deployer: Address, admins: Vec<Address>, admin_threshold: u32, token: Address) -> Result<(), ContractError>`
+
+One-time contract initialization. Sets up the protocol with admin addresses, threshold for multi-sig operations, and the primary token.
+
+**Parameters**:
+- `deployer`: Address that deployed the contract (must sign the transaction)
+- `admins`: Vector of admin addresses for governance
+- `admin_threshold`: Minimum number of admins required for approval (1-`admins.len()`)
+- `token`: Primary token contract address (must implement SEP-41)
+
+**Errors**: `AlreadyInitialized`, `InvalidAdminThreshold`, `InvalidToken`, `ZeroAddress`
+
+**Events**: `contract/init` with `(deployer, admins, admin_threshold, token)`
+
+##### `set_config(admin_signers, config)`
+**Signature**: `fn set_config(env: Env, admin_signers: Vec<Address>, config: Config)`
+
+Update the entire protocol configuration. Requires admin approval.
+
+**Parameters**:
+- `admin_signers`: Vector of admin addresses (must meet threshold)
+- `config`: New configuration struct
+
+**Errors**: Admin approval errors
+
+##### `update_config(admin_signers, yield_bps, slash_bps)`
+**Signature**: `fn update_config(env: Env, admin_signers: Vec<Address>, yield_bps: Option<i128>, slash_bps: Option<i128>)`
+
+Update specific configuration parameters. Requires admin approval.
+
+**Parameters**:
+- `admin_signers`: Vector of admin addresses (must meet threshold)
+- `yield_bps`: Optional new yield rate in basis points
+- `slash_bps`: Optional new slash rate in basis points
+
+**Errors**: Admin approval errors
+
+##### `pause(admin_signers)`
+**Signature**: `fn pause(env: Env, admin_signers: Vec<Address>)`
+
+Pause the contract, preventing all state-changing operations except admin functions.
+
+**Parameters**:
+- `admin_signers`: Vector of admin addresses (must meet threshold)
+
+**Errors**: Admin approval errors
+
+##### `unpause(admin_signers)`
+**Signature**: `fn unpause(env: Env, admin_signers: Vec<Address>)`
+
+Resume contract operations after pausing.
+
+**Parameters**:
+- `admin_signers`: Vector of admin addresses (must meet threshold)
+
+**Errors**: Admin approval errors
+
+#### Vouching
+
+##### `vouch(voucher, borrower, stake, token)`
+**Signature**: `fn vouch(env: Env, voucher: Address, borrower: Address, stake: i128, token: Address) -> Result<(), ContractError>`
+
+Stake tokens to vouch for a borrower. Creates social collateral.
+
+**Parameters**:
+- `voucher`: Address staking tokens
+- `borrower`: Address being vouched for
+- `stake`: Amount to stake in stroops (must be > 0)
+- `token`: Token contract address (must be allowed)
+
+**Errors**: `SelfVouchNotAllowed`, `ActiveLoanExists`, `DuplicateVouch`, `MinStakeNotMet`, `InvalidToken`, `InsufficientVoucherBalance`, `ContractPaused`
+
+**Events**: `vouch/create` with `(voucher, borrower, stake, token)`
+
+##### `batch_vouch(voucher, borrowers, stakes, token)`
+**Signature**: `fn batch_vouch(env: Env, voucher: Address, borrowers: Vec<Address>, stakes: Vec<i128>, token: Address) -> Result<(), ContractError>`
+
+Stake for multiple borrowers in a single atomic transaction. Implements all-or-nothing semantics: all vouches are fully validated before any state is mutated or tokens are transferred. If any single vouch fails validation, the entire batch is rejected and no state changes occur — the borrower list is never left in a partially-vouched state.
+
+**Atomic guarantee**: Phase 1 runs `validate_vouch` for every entry in the batch. Only if all entries pass does Phase 2 call `commit_vouch` for each entry. A failure in Phase 1 returns immediately without touching storage or token balances.
+
+**Parameters**:
+- `voucher`: Address staking tokens (must sign the transaction)
+- `borrowers`: Vector of borrower addresses
+- `stakes`: Vector of stake amounts in stroops (must be same length as `borrowers`)
+- `token`: Token contract address (must be allowed)
+
+**Errors**: Same as `vouch()`. Returns `InsufficientFunds` if `borrowers` and `stakes` lengths differ or the batch is empty.
+
+##### `increase_stake(voucher, borrower, additional_stake, token)`
+**Signature**: `fn increase_stake(env: Env, voucher: Address, borrower: Address, additional_stake: i128, token: Address) -> Result<(), ContractError>`
+
+Add more stake to an existing vouch.
+
+**Parameters**:
+- `voucher`: Address increasing stake
+- `borrower`: Address being vouched for
+- `additional_stake`: Additional amount to stake in stroops
+- `token`: Token contract address
+
+**Errors**: `NoVouchesForBorrower`, `VoucherNotFound`, `InvalidToken`, `ContractPaused`
+
+##### `decrease_stake(voucher, borrower, reduced_stake, token)`
+**Signature**: `fn decrease_stake(env: Env, voucher: Address, borrower: Address, reduced_stake: i128, token: Address) -> Result<(), ContractError>`
+
+Reduce stake in an existing vouch (cannot reduce below minimum).
+
+**Parameters**:
+- `voucher`: Address reducing stake
+- `borrower`: Address being vouched for
+- `reduced_stake`: New total stake amount in stroops
+- `token`: Token contract address
+
+**Errors**: `NoVouchesForBorrower`, `VoucherNotFound`, `MinStakeNotMet`, `InvalidToken`, `ContractPaused`
+
+##### `withdraw_vouch(voucher, borrower, token)`
+**Signature**: `fn withdraw_vouch(env: Env, voucher: Address, borrower: Address, token: Address) -> Result<(), ContractError>`
+
+Completely withdraw a vouch and return staked tokens.
+
+**Parameters**:
+- `voucher`: Address withdrawing vouch
+- `borrower`: Address being vouched for
+- `token`: Token contract address
+
+**Errors**: `NoVouchesForBorrower`, `VoucherNotFound`, `ActiveLoanExists`, `InvalidToken`, `ContractPaused`
+
+#### Loans
+
+##### `request_loan(borrower, amount, threshold, loan_purpose, token)`
+**Signature**: `fn request_loan(env: Env, borrower: Address, amount: i128, threshold: i128, loan_purpose: String, token: Address) -> Result<(), ContractError>`
+
+Request a loan if sufficient vouches exist. Disburses funds to borrower.
+
+**Parameters**:
+- `borrower`: Address requesting loan
+- `amount`: Loan amount in stroops
+- `threshold`: Minimum total stake required
+- `loan_purpose`: Description of loan purpose
+- `token`: Token contract address
+
+**Errors**: `Blacklisted`, `LoanBelowMinAmount`, `LoanExceedsMaxAmount`, `InsufficientFunds`, `InsufficientVouchers`, `VouchTooRecent`, `InvalidToken`, `ContractPaused`
+
+**Events**: `loan/request` with `(borrower, amount, threshold, loan_purpose, token)`
+
+##### `repay(borrower, payment)`
+**Signature**: `fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractError>`
+
+Repay loan principal and yield. Distributes yield to vouchers.
+
+**Parameters**:
+- `borrower`: Address repaying loan
+- `payment`: Payment amount in stroops
+
+**Errors**: `NoActiveLoan`, `LoanPastDeadline`, `InvalidAmount`, `UnauthorizedCaller`, `ContractPaused`
+
+**Events**: `loan/repay` with `(borrower, payment)`
+
+#### Governance
+
+##### `vote_slash(voucher, borrower, approve)`
+**Signature**: `fn vote_slash(env: Env, voucher: Address, borrower: Address, approve: bool) -> Result<(), ContractError>`
+
+Vote on whether to slash a defaulted borrower.
+
+**Parameters**:
+- `voucher`: Address voting
+- `borrower`: Address of defaulted borrower
+- `approve`: True to approve slash, false to reject
+
+**Errors**: `NoVouchesForBorrower`, `VoucherNotFound`, `AlreadyVoted`, `ContractPaused`
+
+##### `execute_slash_vote(borrower)`
+**Signature**: `fn execute_slash_vote(env: Env, borrower: Address) -> Result<(), ContractError>`
+
+Execute slash if quorum is met.
+
+**Parameters**:
+- `borrower`: Address to slash
+
+**Errors**: `SlashVoteNotFound`, `SlashAlreadyExecuted`, `QuorumNotMet`
+
+#### Queries
+
+##### `get_admins() -> Vec<Address>`
+**Signature**: `fn get_admins(env: Env) -> Vec<Address>`
+
+Get the list of admin addresses.
+
+**Returns**: Vector of admin addresses
+
+##### `get_config() -> Config`
+**Signature**: `fn get_config(env: Env) -> Config`
+
+Get the current protocol configuration.
+
+**Returns**: Config struct
+
+##### `get_fee_treasury() -> i128`
+**Signature**: `fn get_fee_treasury(env: Env) -> i128`
+
+Get the accumulated protocol fees balance.
+
+**Returns**: Balance in stroops
+
+##### `loan_status(borrower) -> LoanStatus`
+**Signature**: `fn loan_status(env: Env, borrower: Address) -> LoanStatus`
+
+Get the loan status for a borrower.
+
+**Parameters**:
+- `borrower`: Borrower address
+
+**Returns**: LoanStatus enum
+
+##### `get_loan(borrower) -> Option<LoanRecord>`
+**Signature**: `fn get_loan(env: Env, borrower: Address) -> Option<LoanRecord>`
+
+Get the active loan record for a borrower.
+
+**Parameters**:
+- `borrower`: Borrower address
+
+**Returns**: Option containing LoanRecord
+
+##### `get_vouches(borrower) -> Option<Vec<VouchRecord>>`
+**Signature**: `fn get_vouches(env: Env, borrower: Address) -> Option<Vec<VouchRecord>>`
+
+Get all vouches for a borrower.
+
+**Parameters**:
+- `borrower`: Borrower address
+
+**Returns**: Option containing vector of VouchRecord
+
+##### `is_eligible(borrower, threshold, token_addr) -> bool`
+**Signature**: `fn is_eligible(env: Env, borrower: Address, threshold: i128, token_addr: Address) -> bool`
+
+Check if a borrower is eligible for a loan.
+
+**Parameters**:
+- `borrower`: Borrower address
+- `threshold`: Minimum stake required
+- `token_addr`: Token address
+
+**Returns**: True if eligible
+
+##### `total_vouched(borrower) -> Result<i128, ContractError>`
+**Signature**: `fn total_vouched(env: Env, borrower: Address) -> Result<i128, ContractError>`
+
+Get total vouched amount for a borrower.
+
+**Parameters**:
+- `borrower`: Borrower address
+
+**Returns**: Total vouched amount in stroops
+
+### Storage Keys
+
+All storage uses Soroban persistent storage with the following keys:
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `DataKey::Config` | `Config` | Protocol configuration parameters |
+| `DataKey::Deployer` | `Address` | Contract deployer address |
+| `DataKey::Loan(loan_id)` | `LoanRecord` | Individual loan records |
+| `DataKey::ActiveLoan(borrower)` | `u64` | Active loan ID for borrower |
+| `DataKey::LatestLoan(borrower)` | `u64` | Latest loan ID for borrower |
+| `DataKey::Vouches(borrower)` | `Vec<VouchRecord>` | All vouches for a borrower |
+| `DataKey::Paused` | `bool` | Contract pause state |
+| `DataKey::SlashTreasury` | `i128` | Accumulated slashed funds |
+| `DataKey::ProtocolFeeBps` | `u32` | Protocol fee in basis points |
+| `DataKey::FeeTreasury` | `Address` | Fee treasury address |
+| `DataKey::SlashVote(borrower)` | `SlashVoteRecord` | Active slash vote |
+| `DataKey::RepaymentCount(borrower)` | `u32` | Successful repayment count |
+| `DataKey::LoanCount(borrower)` | `u32` | Total loan count |
+| `DataKey::DefaultCount(borrower)` | `u32` | Default count |
+
+### Events
+
+The contract emits the following events:
+
+| Event | Data | Trigger |
+|-------|------|---------|
+| `contract/init` | `(deployer, admins, admin_threshold, token)` | Contract initialization |
+| `vouch/create` | `(voucher, borrower, stake, token)` | New vouch created |
+| `vouch/increase` | `(voucher, borrower, additional_stake, token)` | Stake increased |
+| `vouch/decrease` | `(voucher, borrower, reduced_stake, token)` | Stake decreased |
+| `vouch/withdraw` | `(voucher, borrower, returned_stake, token)` | Vouch withdrawn |
+| `loan/request` | `(borrower, amount, threshold, loan_purpose, token)` | Loan requested |
+| `loan/repay` | `(borrower, payment)` | Loan repayment |
+| `loan/slash` | `(borrower, slashed_amount)` | Loan slashed |
+| `admin/config` | `(admin, config)` | Configuration updated |
+| `admin/pause` | `(admin)` | Contract paused |
+| `admin/unpause` | `(admin)` | Contract unpaused |
+
+### Data Structures
+
+#### Config
+```rust
+pub struct Config {
+    pub admins: Vec<Address>,
+    pub admin_threshold: u32,
+    pub token: Address,
+    pub allowed_tokens: Vec<Address>,
+    pub yield_bps: i128,
+    pub slash_bps: i128,
+    pub max_vouchers: u32,
+    pub min_loan_amount: i128,
+    pub loan_duration: u64,
+    pub max_loan_to_stake_ratio: u32,
+    pub grace_period: u64,
+}
+```
+
+#### LoanRecord
+```rust
+pub struct LoanRecord {
+    pub id: u64,
+    pub borrower: Address,
+    pub co_borrowers: Vec<Address>,
+    pub amount: i128,
+    pub amount_repaid: i128,
+    pub total_yield: i128,
+    pub status: LoanStatus,
+    pub created_at: u64,
+    pub disbursement_timestamp: u64,
+    pub repayment_timestamp: Option<u64>,
+    pub deadline: u64,
+    pub loan_purpose: String,
+    pub token_address: Address,
+}
+```
+
+#### VouchRecord
+```rust
+pub struct VouchRecord {
+    pub voucher: Address,
+    pub stake: i128,
+    pub vouch_timestamp: u64,
+    pub token: Address,
+}
+```
+
+#### LoanStatus
+```rust
+pub enum LoanStatus {
+    None,
+    Active,
+    Repaid,
+    Defaulted,
+}
+```
+
+### Examples
+
+#### Basic Loan Flow
+```javascript
+// 1. Initialize contract
+await contract.initialize(deployer, [admin], 1, tokenAddress);
+
+// 2. Voucher stakes for borrower
+await contract.vouch(voucher, borrower, 10000000000n, tokenAddress); // 1000 XLM
+
+// 3. Borrower requests loan
+await contract.requestLoan(borrower, 5000000000n, 10000000000n, "Business expansion", tokenAddress);
+
+// 4. Borrower repays loan
+await contract.repay(borrower, 5100000000n); // Principal + 2% yield
+```
+
+#### Admin Configuration
+```javascript
+// Update yield rate to 3%
+await contract.updateConfig([admin], 300n, null);
+
+// Set protocol fee to 0.5%
+await contract.setProtocolFee([admin], 50);
+```
+
+### Troubleshooting
+
+#### Common Issues
+- **InsufficientFunds**: Ensure contract has enough tokens and borrower has sufficient vouches
+- **LoanPastDeadline**: Loans must be repaid before deadline; use slash for defaults
+- **ContractPaused**: Wait for admin to unpause or contact protocol administrators
+- **InvalidToken**: Only use allowed tokens; check `getConfig().allowedTokens`
+
+#### Debug Steps
+1. Check contract balance: `getContractBalance()`
+2. Verify vouches: `getVouches(borrower)`
+3. Check loan status: `loanStatus(borrower)`
+4. Review configuration: `getConfig()`
+
+---
+
+## Frequently Asked Questions (FAQ)
+
+### Protocol
+
+**What is QuorumCredit?**
+QuorumCredit is a decentralized microlending protocol on Stellar Soroban that replaces asset collateral with social collateral. Vouchers stake XLM to back borrowers they trust. If the loan is repaid, vouchers earn yield. If the borrower defaults, vouchers are slashed.
+
+**What happens if a borrower defaults?**
+After the loan deadline passes without full repayment, an admin (or quorum of vouchers via `vote_slash`) can trigger a slash. Each voucher loses `slash_bps / 10_000` of their staked amount (default: 50%). The slashed funds accumulate in the slash treasury. The borrower's default count increments, affecting future loan eligibility.
+
+**Can I vouch for multiple borrowers at once?**
+Yes — use `batch_vouch(voucher, borrowers, stakes, token)`. It provides atomic all-or-nothing semantics: all vouches are validated before any state changes. If one entry is invalid, the entire batch is rejected and no tokens are transferred.
+
+**What is the minimum stake to earn yield?**
+50 stroops (0.000005 XLM). At the default 2% yield rate, `stake * 200 / 10_000` truncates to zero for stakes below 50 stroops. The contract enforces this minimum and rejects smaller stakes with `MinStakeNotMet`.
+
+**Can I withdraw my vouch?**
+Yes, with restrictions. You can call `withdraw_vouch()` or `decrease_stake()` at any time — unless the borrower has an active loan. Once a loan is disbursed, your stake is locked until the loan is repaid or defaulted. This protects borrowers from having their collateral pulled mid-loan.
+
+**How is yield funded?**
+Yield is sourced from a pre-funded yield reserve held by the contract. It is not minted — the contract must hold sufficient tokens to cover both principal and yield at repayment time. If the reserve is depleted, repayment will fail with `InsufficientFunds`. Admins are responsible for maintaining the reserve.
+
+**What tokens are supported?**
+The primary token is set at initialization. Admins can add additional SEP-41-compliant tokens via `add_allowed_token()`. All amounts are denominated in the token's smallest unit (stroops for XLM: 1 XLM = 10,000,000 stroops).
+
+**Is there a cooldown between vouches?**
+Yes. By default, a voucher must wait 24 hours between vouch calls (`DEFAULT_VOUCH_COOLDOWN_SECS`). This is configurable by admins. Attempting to vouch before the cooldown expires returns `VouchCooldownActive`.
+
+### Deployment
+
+**How do I deploy to testnet?**
+See the [Deployment](#deployment) section. The key requirement is that the same keypair that signs the `deploy` transaction must also sign the `initialize` transaction. Using a different key will cause `initialize` to panic.
+
+**Can I upgrade the contract after deployment?**
+Yes, via `upgrade(admin_signers, new_wasm_hash)`. This requires `admin_threshold` admin signatures. It is recommended to pause the contract before upgrading and unpause after. See the [Deployment](#deployment) section for the full upgrade sequence.
+
+**What network passphrase should I use?**
+- Testnet: `"Test SDF Network ; September 2015"`
+- Mainnet: `"Public Global Stellar Network ; September 2015"`
+
+**How do I set up multisig admin?**
+Pass multiple addresses in the `admins` vector during `initialize` and set `admin_threshold` to the required quorum (e.g., 2-of-3). All admin functions require `admin_threshold` distinct admin signatures.
+
+### Operation
+
+**How do I pause the contract in an emergency?**
+Call `pause(admin_signers)` with sufficient admin signatures. All state-mutating functions will return `ContractPaused` until `unpause(admin_signers)` is called.
+
+**How do I check if a borrower is eligible for a loan?**
+Call `is_eligible(borrower, threshold, token_addr)`. This returns `true` if the total stake from vouches for that borrower meets or exceeds `threshold` for the given token.
+
+**How do I monitor slash votes?**
+Vouchers call `vote_slash(voucher, borrower, approve)`. Once the approve stake reaches `slash_vote_quorum` (default 50% of total stake), the slash executes automatically. Query the slash vote state via `get_slash_vote_quorum()`.
+
+**Where do slashed funds go?**
+Into the slash treasury (`DataKey::SlashTreasury`). Admins can withdraw via `withdraw_slash_treasury(admin_signers, recipient, amount)`.
+
+**How do I read contract events off-chain?**
+See [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) for event topics, data structures, and how to subscribe using the Stellar Horizon API or a Soroban RPC node.
 
 ---
 
