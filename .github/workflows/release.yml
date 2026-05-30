@@ -60,7 +60,7 @@ jobs:
             > quorum_credit_${{ github.ref_name }}.wasm.sha256
 
       - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: QuorumCredit ${{ github.ref_name }}
           body_path: CHANGELOG.md
