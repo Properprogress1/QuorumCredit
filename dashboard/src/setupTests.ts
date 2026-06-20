@@ -1,0 +1,8 @@
+import "@testing-library/jest-dom";
+
+// Recharts' ResponsiveContainer uses ResizeObserver, which jsdom doesn't implement.
+global.ResizeObserver = class ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};

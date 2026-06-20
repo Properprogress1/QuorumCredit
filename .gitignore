@@ -43,3 +43,4 @@ Thumbs.db
 lcov.info
 coverage/
 tarpaulin-report.html
+dashboard/node_modules/

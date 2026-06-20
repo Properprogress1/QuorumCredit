@@ -1,11 +1,13 @@
+mod analytics;
 mod auth;
 mod logging;
 mod rate_limiter;
 mod webhook;
+mod ws;
 
 use axum::{
-    extract::{State, Json},
-    http::{StatusCode, Request},
+    extract::{State, Json, WebSocketUpgrade},
+    http::{StatusCode, Request, HeaderMap},
     middleware::{self, Next},
     response::Response,
     routing::{get, post, delete},
@@ -24,6 +26,11 @@ use rate_limiter::{
     rate_limit_middleware,
 };
 use webhook::{WebhookManager, WebhookEvent};
+use analytics::{
+    aggregate_metrics, check_alerts, metrics_to_csv,
+    AlertThresholds, LoanSnapshot, MetricsFilter, VouchSnapshot,
+};
+use ws::{MetricsBroadcaster, ws_handler};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,6 +38,7 @@ pub struct AppState {
     logger: Arc<RequestLogger>,
     webhook_manager: Arc<WebhookManager>,
     rate_limiter: RateLimiterState,
+    broadcaster: Arc<MetricsBroadcaster>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -162,6 +170,90 @@ async fn get_logs(
     Json(logs)
 }
 
+// ---------------------------------------------------------------------------
+// Admin analytics endpoint
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/admin/metrics
+#[derive(Serialize, Deserialize)]
+pub struct MetricsRequest {
+    pub loans: Vec<LoanSnapshot>,
+    pub vouches: Vec<VouchSnapshot>,
+    pub slash_count: u32,
+    pub fee_revenue: i128,
+    pub filter: Option<MetricsFilter>,
+    pub peak_tvl: Option<i128>,
+    pub alert_thresholds: Option<AlertThresholds>,
+    /// "json" (default) or "csv"
+    pub export_format: Option<String>,
+}
+
+/// Admin-only metrics handler.
+/// Callers must supply a valid JWT in `Authorization: Bearer <token>`.
+async fn admin_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<MetricsRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    // Auth check
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+    let token = JwtAuth::extract_token_from_header(auth_header)
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    state
+        .jwt_auth
+        .verify_token(&token)
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+
+    let now_ts = chrono::Utc::now().timestamp();
+    let filter = payload.filter.unwrap_or_default();
+    let metrics = aggregate_metrics(
+        &payload.loans,
+        &payload.vouches,
+        payload.slash_count,
+        payload.fee_revenue,
+        &filter,
+        now_ts,
+    );
+
+    let thresholds = payload.alert_thresholds.unwrap_or_default();
+    let alerts = check_alerts(&metrics, payload.peak_tvl.unwrap_or(0), &thresholds);
+
+    // Broadcast to WebSocket subscribers
+    state.broadcaster.publish(serde_json::to_value(&metrics).unwrap_or_default());
+
+    match payload.export_format.as_deref() {
+        Some("csv") => {
+            let csv = metrics_to_csv(&[metrics]);
+            Ok(axum::response::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/csv")
+                .header("Content-Disposition", "attachment; filename=\"metrics.csv\"")
+                .body(axum::body::Body::from(csv))
+                .unwrap())
+        }
+        _ => {
+            let body = serde_json::json!({ "metrics": metrics, "alerts": alerts });
+            Ok(axum::response::Response::builder()
+                .status(200)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap())
+        }
+    }
+}
+
+/// WebSocket upgrade handler for real-time metrics streaming.
+async fn metrics_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    let broadcaster = state.broadcaster.clone();
+    ws.on_upgrade(move |socket| ws_handler(socket, broadcaster))
+}
+
 async fn health_check() -> &'static str {
     "OK"
 }
@@ -247,6 +339,7 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         logger: Arc::new(RequestLogger::new()),
         webhook_manager: Arc::new(WebhookManager::new()),
         rate_limiter: rl.clone(),
+        broadcaster: Arc::new(MetricsBroadcaster::new()),
     };
 
     let app = Router::new()
@@ -258,6 +351,8 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .route("/webhooks/unsubscribe", delete(unsubscribe_webhook))
         .route("/webhooks/events", post(deliver_webhook_event))
         .route("/logs", get(get_logs))
+        .route("/api/admin/metrics", post(admin_metrics))
+        .route("/api/admin/metrics/ws", get(metrics_ws))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             logging_middleware,
@@ -295,11 +390,12 @@ mod tests {
             RateLimitConfig::new(Tier::Free),
             Arc::new(InMemoryStore::new()),
         )));
-        let _state = AppState {
+        let state = AppState {
             jwt_auth: Arc::new(JwtAuth::new("test_secret".to_string())),
             logger: Arc::new(RequestLogger::new()),
             webhook_manager: Arc::new(WebhookManager::new()),
             rate_limiter: rl,
+            broadcaster: Arc::new(MetricsBroadcaster::new()),
         };
 
         assert!(Arc::strong_count(&state.jwt_auth) >= 1);
