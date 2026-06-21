@@ -102,4 +102,14 @@ pub enum ContractError {
     ReputationAlreadySpent = 105,
     /// A newer reputation attestation has already been applied.
     StaleBridgeAttestation = 106,
+    /// Governance proposal has already been approved.
+    ProposalAlreadyApproved = 107,
+    /// Governance proposal has expired.
+    ProposalExpired = 108,
+    /// Governance proposal timelock delay has not elapsed.
+    TimelockDelayNotElapsed = 109,
+    /// Governance proposal execution window has passed.
+    ExecutionWindowPassed = 110,
+    /// Governance action is invalid or not supported.
+    InvalidGovernanceAction = 111,
 }

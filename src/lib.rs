@@ -48,6 +48,8 @@ mod cross_chain_vouch_test;
 mod property_stake_loan_invariants_test;
 #[cfg(test)]
 mod admin_whitelist_blacklist_test;
+#[cfg(test)]
+mod governance_queue_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
@@ -1522,6 +1524,71 @@ impl QuorumCreditContract {
         proposal_id: u64,
     ) -> Option<ConfigUpdateProposal> {
         admin::get_config_update_proposal(env, proposal_id)
+    }
+
+    // ── Admin Governance Queue with Multi-Signature Confirmation ─────────────
+
+    pub fn set_governance_queue_config(
+        env: Env,
+        admin_signers: Vec<Address>,
+        config: GovernanceQueueConfig,
+    ) {
+        admin::set_governance_queue_config(env, admin_signers, config)
+    }
+
+    pub fn propose_governance_action(
+        env: Env,
+        proposer: Address,
+        action: GovernanceAction,
+        description: soroban_sdk::String,
+    ) -> Result<u64, ContractError> {
+        admin::propose_governance_action(env, proposer, action, description)
+    }
+
+    pub fn approve_governance_action(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
+        admin::approve_governance_action(env, admin, proposal_id)
+    }
+
+    pub fn reject_governance_action(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
+        admin::reject_governance_action(env, admin, proposal_id)
+    }
+
+    pub fn execute_governance_action(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
+        admin::execute_governance_action(env, proposal_id)
+    }
+
+    pub fn cancel_governance_action(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
+        admin::cancel_governance_action(env, caller, proposal_id)
+    }
+
+    pub fn get_governance_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Option<GovernanceProposal> {
+        admin::get_governance_proposal(env, proposal_id)
+    }
+
+    pub fn get_governance_queue_config_view(env: Env) -> GovernanceQueueConfig {
+        admin::get_governance_queue_config_view(env)
+    }
+
+    pub fn get_governance_proposal_count(env: Env) -> u64 {
+        admin::get_governance_proposal_count(env)
     }
 
     // ── Issue #683: emergency pause ───────────────────────────────────────────

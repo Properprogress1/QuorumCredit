@@ -378,6 +378,12 @@ pub enum DataKey {
     DeploymentRecordCount,
     /// Issue #744: rollback snapshot of config keyed by version index
     RollbackSnapshot(u32),
+    /// Governance proposal id → GovernanceProposal
+    GovernanceProposal(u64),
+    /// Governance proposal counter (monotonically increasing)
+    GovernanceProposalCounter,
+    /// Governance queue configuration
+    GovernanceQueueConfig,
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -439,6 +445,138 @@ pub struct ConfigUpdateProposal {
     pub approvals: Vec<Address>,
     pub executed: bool,
 }
+
+// ── Admin Governance Queue with Multi-Signature Confirmation ─────────────────────
+
+/// Types of governance actions that can be proposed in the admin governance queue.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GovernanceAction {
+    /// Pause the contract
+    Pause,
+    /// Unpause the contract
+    Unpause,
+    /// Upgrade the contract to a new WASM hash
+    Upgrade(BytesN<32>),
+    /// Set protocol fee in basis points
+    SetProtocolFee(u32),
+    /// Set fee treasury address
+    SetFeeTreasury(Address),
+    /// Add an allowed token
+    AddAllowedToken(Address),
+    /// Remove an allowed token
+    RemoveAllowedToken(Address),
+    /// Set minimum stake amount
+    SetMinStake(i128),
+    /// Set maximum loan amount
+    SetMaxLoanAmount(i128),
+    /// Set minimum vouchers required
+    SetMinVouchers(u32),
+    /// Set maximum vouchers per borrower
+    SetMaxVouchersPerBorrower(u32),
+    /// Set max loan to stake ratio
+    SetMaxLoanToStakeRatio(u32),
+    /// Set grace period
+    SetGracePeriod(u64),
+    /// Set yield basis points
+    SetYieldBps(i128),
+    /// Set slash basis points
+    SetSlashBps(i128),
+    /// Set admin threshold
+    SetAdminThreshold(u32),
+    /// Add an admin
+    AddAdmin(Address),
+    /// Remove an admin
+    RemoveAdmin(Address),
+    /// Rotate an admin
+    RotateAdmin(Address, Address),
+    /// Set reputation NFT contract
+    SetReputationNft(Address),
+    /// Set whitelist enabled
+    SetWhitelistEnabled(bool),
+    /// Blacklist a borrower
+    BlacklistBorrower(Address),
+    /// Set prepayment penalty basis points
+    SetPrepaymentPenaltyBps(u32),
+    /// Set dynamic slash threshold enabled
+    SetDynamicSlashThreshold(bool),
+    /// Set loan size slash enabled
+    SetLoanSizeSlashEnabled(bool),
+    /// Set loan size slash max basis points
+    SetLoanSizeSlashMaxBps(i128),
+    /// Set successor admin
+    SetSuccessorAdmin(Option<Address>),
+    /// Set confirmation required
+    SetConfirmationRequired(bool),
+    /// Set admin compensation basis points
+    SetAdminCompensationBps(u32),
+    /// Set removal vote threshold
+    SetRemovalVoteThreshold(u32),
+    /// Set rate limit config
+    SetRateLimitConfig(RateLimitConfig),
+}
+
+/// Status of a governance proposal in the queue.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GovernanceProposalStatus {
+    /// Proposal is pending approval
+    Pending,
+    /// Proposal has been approved and can be executed
+    Approved,
+    /// Proposal has been executed
+    Executed,
+    /// Proposal has been cancelled
+    Cancelled,
+    /// Proposal has expired
+    Expired,
+}
+
+/// A governance proposal in the admin governance queue with multi-signature confirmation.
+#[contracttype]
+#[derive(Clone)]
+pub struct GovernanceProposal {
+    /// Unique proposal ID
+    pub id: u64,
+    /// The governance action to be executed
+    pub action: GovernanceAction,
+    /// Address that proposed the action
+    pub proposer: Address,
+    /// Addresses that have approved this proposal
+    pub approvals: Vec<Address>,
+    /// Addresses that have rejected this proposal
+    pub rejections: Vec<Address>,
+    /// Current status of the proposal
+    pub status: GovernanceProposalStatus,
+    /// Ledger timestamp when the proposal was created
+    pub created_at: u64,
+    /// Ledger timestamp when the proposal can be executed (timelock)
+    pub executable_at: u64,
+    /// Ledger timestamp when the proposal expires (if not executed)
+    pub expires_at: u64,
+    /// Optional description or justification for the proposal
+    pub description: soroban_sdk::String,
+    /// Ledger timestamp when the proposal was executed (if applicable)
+    pub executed_at: Option<u64>,
+}
+
+/// Governance queue configuration parameters.
+#[contracttype]
+#[derive(Clone)]
+pub struct GovernanceQueueConfig {
+    /// Minimum delay before a proposal can be executed (in seconds)
+    pub timelock_delay: u64,
+    /// Time window after executable_at during which a proposal can be executed (in seconds)
+    pub execution_window: u64,
+    /// Whether proposals require multi-sig approval (true) or can be executed by proposer (false)
+    pub require_multisig: bool,
+}
+
+/// Default timelock delay for governance proposals (24 hours).
+pub const DEFAULT_GOVERNANCE_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
+
+/// Default execution window for governance proposals (7 days).
+pub const DEFAULT_GOVERNANCE_EXECUTION_WINDOW: u64 = 7 * 24 * 60 * 60;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
