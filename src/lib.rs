@@ -127,6 +127,22 @@ impl QuorumCreditContract {
 
     // ── Vouching ──────────────────────────────────────────────────────────────
 
+                min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
+                prepayment_penalty_bps: 0,
+                liquidity_mining_rate_bps: DEFAULT_LIQUIDITY_MINING_RATE_BPS,
+                voting_period_seconds: DEFAULT_VOTING_PERIOD_SECONDS,
+                slash_cooldown_seconds: 0,
+                emergency_pause_enabled: false,
+                early_repayment_discount_bps: 0,
+                oracle_address: None,
+                slash_delay_seconds: 0,
+                successor_admin: None,
+            },
+        );
+
+        Ok(())
+    }
+
     pub fn vouch(
         env: Env,
         voucher: Address,
@@ -135,6 +151,9 @@ impl QuorumCreditContract {
         token: Address,
     ) -> Result<(), ContractError> {
         vouch::vouch(env, voucher, borrower, stake, token)
+        chain_id: Option<u32>,
+    ) -> Result<(), ContractError> {
+        vouch::vouch(env, voucher, borrower, stake, token, chain_id)
     }
 
     /// Issue #632: Vouch with cross-chain support.
@@ -186,6 +205,9 @@ impl QuorumCreditContract {
         token: Address,
     ) -> Result<(), ContractError> {
         vouch::batch_vouch(env, voucher, borrowers, stakes, token)
+        chain_id: Option<u32>,
+    ) -> Result<(), ContractError> {
+        vouch::batch_vouch(env, voucher, borrowers, stakes, token, chain_id)
     }
 
     pub fn increase_stake(
@@ -385,13 +407,6 @@ impl QuorumCreditContract {
         {
             ReputationNftExternalClient::new(&env, &nft_addr).burn(&borrower);
         }
-    }
-
-    pub fn request_loan(
-        env: Env,
-        borrower: Address,
-        amount: i128,
-        threshold: i128,
         loan_purpose: String,
         token_addr: Address,
     ) -> Result<(), ContractError> {
@@ -1094,8 +1109,6 @@ impl QuorumCreditContract {
 
     pub fn add_admin(env: Env, admin_signers: Vec<Address>, new_admin: Address) {
         admin::add_admin(env, admin_signers, new_admin)
-    }
-
     /// #669: Retry a failed repayment. Increments retry_count and re-attempts the transfer.
     /// Returns `MaxRetriesExceeded` if retry_count >= MAX_REPAYMENT_RETRIES.
     pub fn retry_repayment(
@@ -1494,8 +1507,6 @@ impl QuorumCreditContract {
 
     pub fn get_config(env: Env) -> Config {
         admin::get_config(env)
-    }
-
     // ── Issue #682: multi-sig config updates ──────────────────────────────────
 
     pub fn propose_config_update(
