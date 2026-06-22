@@ -388,6 +388,18 @@ pub enum DataKey {
     CreditScore(Address),
     /// Credit score configuration
     CreditScoreConfig,
+    /// Loan syndication record
+    LoanSyndication(u64),
+    /// Syndication counter (monotonically increasing)
+    SyndicationCounter,
+    /// Syndication configuration
+    SyndicationConfig,
+    /// Syndication member index (syndication_id, member_address) → SyndicationMember
+    SyndicationMember(u64, Address),
+    /// Syndication repayment records
+    SyndicationRepayment(u64, u64), // syndication_id, repayment_index
+    /// Syndication repayment counter
+    SyndicationRepaymentCounter(u64), // syndication_id → counter
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -735,6 +747,129 @@ pub const DEFAULT_CREDIT_SCORE_CONFIG: CreditScoreConfig = CreditScoreConfig {
     good_rewards: DEFAULT_GOOD_REWARDS,
     very_good_rewards: DEFAULT_VERY_GOOD_REWARDS,
     excellent_rewards: DEFAULT_EXCELLENT_REWARDS,
+};
+
+// ── Loan Pool Syndication for Multi-Borrower Loans ───────────────────────────────
+
+/// Syndication role for a member in a loan syndicate.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SyndicationRole {
+    /// Lead borrower - primary contact and decision maker
+    LeadBorrower,
+    /// Co-borrower - shares loan responsibility
+    CoBorrower,
+    /// Guarantor - provides additional collateral but not a borrower
+    Guarantor,
+}
+
+/// Syndication member information.
+#[contracttype]
+#[derive(Clone)]
+pub struct SyndicationMember {
+    /// Member address
+    pub address: Address,
+    /// Role in the syndication
+    pub role: SyndicationRole,
+    /// Share of the loan (in basis points, e.g., 5000 = 50%)
+    pub share_bps: u32,
+    /// Collateral contributed (in stroops)
+    pub collateral: i128,
+    /// Vouches contributed (stake amount in stroops)
+    pub vouch_stake: i128,
+    /// Whether the member has approved the syndication
+    pub approved: bool,
+    /// Ledger timestamp when the member joined
+    pub joined_at: u64,
+}
+
+/// Loan syndication record for multi-borrower loans.
+#[contracttype]
+#[derive(Clone)]
+pub struct LoanSyndication {
+    /// Unique syndication ID
+    pub syndication_id: u64,
+    /// Associated loan ID (if loan has been disbursed)
+    pub loan_id: Option<u64>,
+    /// Syndication members
+    pub members: Vec<SyndicationMember>,
+    /// Total loan amount requested (in stroops)
+    pub total_amount: i128,
+    /// Total collateral contributed (in stroops)
+    pub total_collateral: i128,
+    /// Total vouch stake (in stroops)
+    pub total_vouch_stake: i128,
+    /// Loan purpose description
+    pub loan_purpose: soroban_sdk::String,
+    /// Token address for the loan
+    pub token_address: Address,
+    /// Ledger timestamp when syndication was created
+    pub created_at: u64,
+    /// Ledger timestamp when syndication was disbursed (if applicable)
+    pub disbursed_at: Option<u64>,
+    /// Syndication status
+    pub status: SyndicationStatus,
+    /// Minimum number of approvals required
+    pub min_approvals: u32,
+    /// Current number of approvals
+    pub approval_count: u32,
+}
+
+/// Syndication status.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SyndicationStatus {
+    /// Syndication is being formed
+    Forming,
+    /// Syndication is ready for loan disbursement
+    Ready,
+    /// Loan has been disbursed
+    Active,
+    /// Loan has been fully repaid
+    Repaid,
+    /// Syndication has been cancelled
+    Cancelled,
+    /// Syndication has defaulted
+    Defaulted,
+}
+
+/// Syndication repayment record.
+#[contracttype]
+#[derive(Clone)]
+pub struct SyndicationRepayment {
+    /// Syndication ID
+    pub syndication_id: u64,
+    /// Member who made the repayment
+    pub repayer: Address,
+    /// Amount repaid (in stroops)
+    pub amount: i128,
+    /// Ledger timestamp of repayment
+    pub timestamp: u64,
+}
+
+/// Syndication configuration parameters.
+#[contracttype]
+#[derive(Clone)]
+pub struct SyndicationConfig {
+    /// Maximum number of members in a syndication
+    pub max_members: u32,
+    /// Minimum number of members required
+    pub min_members: u32,
+    /// Minimum approvals required (as percentage of members, e.g., 5000 = 50%)
+    pub min_approval_percentage: u32,
+    /// Maximum loan amount for syndication (in stroops)
+    pub max_loan_amount: i128,
+    /// Syndication fee in basis points (e.g., 100 = 1%)
+    pub syndication_fee_bps: u32,
+}
+
+/// Default syndication configuration.
+pub const DEFAULT_SYNDICATION_CONFIG: SyndicationConfig = SyndicationConfig {
+    max_members: 10,
+    min_members: 2,
+    min_approval_percentage: 7500, // 75%
+    max_loan_amount: 1_000_000_000_000, // 10 million XLM
+    syndication_fee_bps: 100, // 1%
 };
 
 // ── Config ────────────────────────────────────────────────────────────────────

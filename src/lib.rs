@@ -10,6 +10,7 @@ pub mod insurance;
 pub mod loan;
 pub mod reputation;
 pub mod rbac;
+pub mod syndication;
 #[cfg(test)]
 mod tests;
 pub mod types;
@@ -53,6 +54,8 @@ mod admin_whitelist_blacklist_test;
 mod governance_queue_test;
 #[cfg(test)]
 mod credit_score_test;
+#[cfg(test)]
+mod syndication_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
@@ -1618,6 +1621,115 @@ impl QuorumCreditContract {
 
     pub fn get_tier_rewards(env: Env, tier: CreditTier) -> TierRewards {
         credit_score::get_tier_rewards(env, tier)
+    }
+
+    // ── Loan Pool Syndication for Multi-Borrower Loans ─────────────────────────
+
+    pub fn create_syndication(
+        env: Env,
+        creator: Address,
+        loan_purpose: soroban_sdk::String,
+        token_address: Address,
+        total_amount: i128,
+    ) -> Result<u64, ContractError> {
+        syndication::create_syndication(env, creator, loan_purpose, token_address, total_amount)
+    }
+
+    pub fn join_syndication(
+        env: Env,
+        syndication_id: u64,
+        member: Address,
+        role: SyndicationRole,
+        share_bps: u32,
+        collateral: i128,
+        vouch_stake: i128,
+    ) -> Result<(), ContractError> {
+        syndication::join_syndication(
+            env,
+            syndication_id,
+            member,
+            role,
+            share_bps,
+            collateral,
+            vouch_stake,
+        )
+    }
+
+    pub fn approve_syndication(
+        env: Env,
+        syndication_id: u64,
+        member: Address,
+    ) -> Result<(), ContractError> {
+        syndication::approve_syndication(env, syndication_id, member)
+    }
+
+    pub fn leave_syndication(
+        env: Env,
+        syndication_id: u64,
+        member: Address,
+    ) -> Result<(), ContractError> {
+        syndication::leave_syndication(env, syndication_id, member)
+    }
+
+    pub fn cancel_syndication(
+        env: Env,
+        syndication_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        syndication::cancel_syndication(env, syndication_id, caller)
+    }
+
+    pub fn request_syndication_loan(
+        env: Env,
+        syndication_id: u64,
+        lead_borrower: Address,
+    ) -> Result<u64, ContractError> {
+        syndication::request_syndication_loan(env, syndication_id, lead_borrower)
+    }
+
+    pub fn repay_syndication_loan(
+        env: Env,
+        syndication_id: u64,
+        repayer: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        syndication::repay_syndication_loan(env, syndication_id, repayer, amount)
+    }
+
+    pub fn handle_syndication_default(
+        env: Env,
+        syndication_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        syndication::handle_syndication_default(env, syndication_id, caller)
+    }
+
+    pub fn get_syndication(env: Env, syndication_id: u64) -> Option<LoanSyndication> {
+        syndication::get_syndication(env, syndication_id)
+    }
+
+    pub fn get_syndication_member(
+        env: Env,
+        syndication_id: u64,
+        member: Address,
+    ) -> Option<SyndicationMember> {
+        syndication::get_syndication_member(env, syndication_id, member)
+    }
+
+    pub fn get_syndication_config_view(env: Env) -> SyndicationConfig {
+        syndication::get_syndication_config_view(env)
+    }
+
+    pub fn set_syndication_config(
+        env: Env,
+        admin_signers: Vec<Address>,
+        config: SyndicationConfig,
+    ) -> Result<(), ContractError> {
+        syndication::set_syndication_config(env, admin_signers, config)
+    }
+
+    pub fn get_syndication_count(env: Env) -> u64 {
+        syndication::get_syndication_count(env)
     }
 
     // ── Issue #683: emergency pause ───────────────────────────────────────────

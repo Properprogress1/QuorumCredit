@@ -120,4 +120,24 @@ pub enum ContractError {
     CreditScoreNotFound = 114,
     /// Credit score configuration is invalid.
     InvalidCreditConfig = 115,
+    /// Syndication not found.
+    SyndicationNotFound = 116,
+    /// Syndication member not found.
+    SyndicationMemberNotFound = 117,
+    /// Syndication already has a loan.
+    SyndicationHasLoan = 118,
+    /// Syndication is not in the correct status.
+    InvalidSyndicationStatus = 119,
+    /// Syndication member already exists.
+    SyndicationMemberExists = 120,
+    /// Syndication has insufficient approvals.
+    InsufficientSyndicationApprovals = 121,
+    /// Syndication has too many members.
+    SyndicationMaxMembersExceeded = 122,
+    /// Syndication has too few members.
+    SyndicationMinMembersNotMet = 123,
+    /// Invalid syndication share percentage.
+    InvalidSyndicationShare = 124,
+    /// Syndication configuration is invalid.
+    InvalidSyndicationConfig = 125,
 }
