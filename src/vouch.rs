@@ -1084,6 +1084,26 @@ pub fn revoke_delegation(
         .get(&DataKey::Vouches(borrower.clone()))
         .ok_or(ContractError::NoVouchesForBorrower)?;
 
+    let idx = vouches
+        .iter()
+        .position(|v| v.voucher == voucher && v.token == token)
+        .ok_or(ContractError::VoucherNotFound)? as u32;
+
+    vouches.remove(idx);
+
+    if vouches.is_empty() {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Vouches(borrower));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Vouches(borrower), &vouches);
+    }
+
+    Ok(())
+}
+
 pub fn set_vouch_expiry(
     env: Env,
     voucher: Address,
