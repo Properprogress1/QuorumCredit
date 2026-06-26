@@ -446,6 +446,82 @@ pub fn update_config(
     );
 }
 
+/// Atomically batch-update multiple protocol config parameters in a single write.
+/// Each parameter is `Option`al — only `Some` fields are updated.
+/// Requires admin multi-sig approval.
+pub fn batch_update_config(
+    env: Env,
+    admin_signers: Vec<Address>,
+    yield_bps: Option<i128>,
+    slash_bps: Option<i128>,
+    max_vouchers: Option<u32>,
+    min_loan_amount: Option<i128>,
+    loan_duration: Option<u64>,
+    max_loan_to_stake_ratio: Option<u32>,
+    grace_period: Option<u64>,
+    liquidity_mining_rate_bps: Option<u32>,
+) {
+    require_not_paused(&env).expect("contract paused");
+    require_admin_approval(&env, &admin_signers);
+
+    let mut cfg = config(&env);
+
+    if let Some(v) = yield_bps {
+        if v < 0 || v > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidBps);
+        }
+        cfg.yield_bps = v;
+    }
+    if let Some(v) = slash_bps {
+        if v <= 0 || v > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        cfg.slash_bps = v;
+    }
+    if let Some(v) = max_vouchers {
+        if v == 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        cfg.max_vouchers = v;
+    }
+    if let Some(v) = min_loan_amount {
+        if v <= 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        cfg.min_loan_amount = v;
+    }
+    if let Some(v) = loan_duration {
+        if v == 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        cfg.loan_duration = v;
+    }
+    if let Some(v) = max_loan_to_stake_ratio {
+        if v == 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        cfg.max_loan_to_stake_ratio = v;
+    }
+    if let Some(v) = grace_period {
+        if v > cfg.loan_duration {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        cfg.grace_period = v;
+    }
+    if let Some(v) = liquidity_mining_rate_bps {
+        if v > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidBps);
+        }
+        cfg.liquidity_mining_rate_bps = v;
+    }
+
+    env.storage().instance().set(&DataKey::Config, &cfg);
+    env.events().publish(
+        (symbol_short!("admin"), symbol_short!("batch_cfg")),
+        (admin_signers.get(0).unwrap(), env.ledger().timestamp()),
+    );
+}
+
 /// Toggle dynamic slash threshold on/off.
 /// When enabled, slash penalties adjust based on protocol health.
 /// When disabled, uses static slash_bps from Config.

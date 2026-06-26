@@ -1088,6 +1088,32 @@ impl QuorumCreditContract {
         admin::update_config(env, admin_signers, yield_bps, slash_bps)
     }
 
+    pub fn batch_update_config(
+        env: Env,
+        admin_signers: Vec<Address>,
+        yield_bps: Option<i128>,
+        slash_bps: Option<i128>,
+        max_vouchers: Option<u32>,
+        min_loan_amount: Option<i128>,
+        loan_duration: Option<u64>,
+        max_loan_to_stake_ratio: Option<u32>,
+        grace_period: Option<u64>,
+        liquidity_mining_rate_bps: Option<u32>,
+    ) {
+        admin::batch_update_config(
+            env,
+            admin_signers,
+            yield_bps,
+            slash_bps,
+            max_vouchers,
+            min_loan_amount,
+            loan_duration,
+            max_loan_to_stake_ratio,
+            grace_period,
+            liquidity_mining_rate_bps,
+        )
+    }
+
     pub fn set_reputation_nft(env: Env, admin_signers: Vec<Address>, nft_contract: Address) {
         admin::set_reputation_nft(env, admin_signers, nft_contract)
     }
