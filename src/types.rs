@@ -471,6 +471,15 @@ pub enum DataKey {
     BorrowerPool(Address, u64),
     // ── Issue #868: Gradual Unstaking ─────────────────────────────────────────
     GradualUnstake(Address, Address),
+    // ── Issue #882: Loan Insurance Integration ───────────────────────────────
+    /// loan_id → bool: whether insurance was collected at disbursement
+    InsuranceLinked(u64),
+    // ── Issue #884: Prepayment Bonus ─────────────────────────────────────────
+    /// Configurable prepayment bonus rate in basis points
+    PrepaymentBonusBps,
+    // ── Issue #885: Loan Status Privacy ──────────────────────────────────────
+    /// borrower → LoanPrivacyLevel
+    LoanPrivacy(Address),
 }
 
 /// Issue #867: Shared collateral pool backed by multiple vouchers.
@@ -1572,4 +1581,23 @@ pub struct GradualUnstakeSchedule {
     pub created_at: u64,
     /// Ledger timestamp when the next instalment becomes claimable.
     pub next_release_at: u64,
+}
+
+// ── Issue #884: Prepayment Bonus ────────────────────────────────────────────
+
+/// Default prepayment bonus rate in basis points (50 = 0.5% of loan amount).
+pub const DEFAULT_PREPAYMENT_BONUS_BPS: u32 = 50;
+
+// ── Issue #885: Loan Status Privacy ─────────────────────────────────────────
+
+/// Privacy level for loan status visibility.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoanPrivacyLevel {
+    /// Anyone can view loan details (default).
+    Public,
+    /// Only the borrower and their vouchers can view loan details.
+    VouchersOnly,
+    /// Only the borrower can view loan details.
+    Private,
 }

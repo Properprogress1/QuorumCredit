@@ -166,4 +166,12 @@ GradualUnstakeNotFound = 135,
 GradualUnstakeAlreadyActive = 136,
 /// The next instalment is not yet due.
 GradualUnstakeNotDue = 137,
+/// Loan extension request already pending for this borrower.
+ExtensionAlreadyRequested = 138,
+/// Maximum number of extensions per loan has been reached.
+MaxExtensionsReached = 139,
+/// Caller does not have permission to view this loan (privacy restriction).
+LoanPrivacyRestricted = 140,
+/// Insurance pool is not connected to this loan.
+InsuranceNotLinked = 141,
 }
