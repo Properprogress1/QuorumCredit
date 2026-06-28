@@ -1,21 +1,29 @@
 #![no_std]
 
 pub mod admin;
+pub mod archive;
 pub mod attributes;
+pub mod batch_transfer;
+pub mod cache;
+pub mod collateral_pool;
 pub mod credit_score;
+pub mod cross_chain;
 pub mod errors;
+pub mod error_response;
 pub mod governance;
+pub mod gradual_unstake;
 pub mod helpers;
 pub mod insurance;
+pub mod lazy_slash;
 pub mod loan;
+pub mod merkle_tree;
 pub mod partial_repayment;
 pub mod periodic_payments;
-pub mod reputation;
 pub mod rbac;
+pub mod reputation;
 pub mod syndication;
-#[cfg(test)]
-mod tests;
 pub mod types;
+pub mod versioning;
 pub mod vouch;
 pub mod vouch_groups;
 pub mod yield_stream;
@@ -27,6 +35,8 @@ pub mod cross_chain;
 pub mod collateral_pool;
 /// Issue #868: Gradual Unstaking
 pub mod gradual_unstake;
+/// Issue #887: Loan Subordination and Cascading Debt Hierarchy
+pub mod subordination;
 
 pub use errors::ContractError;
 pub use types::*;
@@ -98,17 +108,34 @@ mod loan_features_test;
 
 #[cfg(test)]
 mod co_borrower_test;
+
 #[cfg(test)]
+mod incremental_config_test;
+
+#[cfg(test)]
+mod storage_compaction_test;
+
+#[cfg(test)]
+mod vectorized_score_test;
+
+#[cfg(test)]
+mod query_pagination_test;#[cfg(test)]
 mod dynamic_rate_test;
 #[cfg(test)]
 mod forbearance_test;
 #[cfg(test)]
 mod refinance_test;
 
+#[cfg(test)]
+mod incentives_verification_test;
+#[cfg(test)]
+mod regression_past_bugs_test;
+
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
     require_allowed_token, require_not_paused,
 };
+use crate::types::{AdminOperationType, Config, DataKey, MultiTierAdminThresholds, RateLimitConfig, DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS, DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_SLASH_BPS, DEFAULT_YIELD_BPS, DEFAULT_MIN_VOUCH_AGE_SECS};
 use soroban_sdk::BytesN;
 
 #[contract]
@@ -157,6 +184,22 @@ impl QuorumCreditContract {
                 loan_duration: DEFAULT_LOAN_DURATION,
                 max_loan_to_stake_ratio: DEFAULT_MAX_LOAN_TO_STAKE_RATIO,
                 grace_period: 0,
+                min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
+                prepayment_penalty_bps: 0,
+                liquidity_mining_rate_bps: 0,
+                voting_period_seconds: 14 * 24 * 60 * 60, // 14 days default
+                slash_cooldown_seconds: 0,
+                emergency_pause_enabled: false,
+                early_repayment_discount_bps: 0,
+                oracle_address: None,
+                slash_delay_seconds: 0,
+                successor_admin: None,
+                rate_limit_config: RateLimitConfig {
+                    window_secs: 3600,
+                    max_calls: 1000,
+                    enabled: false,
+                },
+                multi_tier_thresholds: None, // Issue #893: Initialize with no multi-tier thresholds
             },
         );
 
@@ -1593,6 +1636,91 @@ impl QuorumCreditContract {
         syndication::handle_syndication_default(env, syndication_id, caller)
     }
 
+    // ── Data Archiving ────────────────────────────────────────────────────────
+
+    /// Get the total count of archived loans.
+    pub fn get_archive_count(env: Env) -> u64 {
+        archive::get_archive_count(&env)
+    }
+
+    /// Retrieve an archived loan by archive ID.
+    pub fn get_archived_loan(env: Env, archive_id: u64) -> Option<ArchivedLoanRecord> {
+        archive::get_archived_loan(&env, archive_id)
+    }
+
+    /// Archive vouch history when it exceeds the threshold.
+    /// This moves old entries to archived storage to reduce persistent storage bloat.
+    pub fn archive_vouch_history(
+        env: Env,
+        borrower: Address,
+        voucher: Address,
+        token: Address,
+        max_active_entries: u32,
+    ) -> Result<(), ContractError> {
+        archive::archive_vouch_history(&env, &borrower, &voucher, &token, max_active_entries)
+    }
+
+    /// Retrieve archived vouch history for a specific batch.
+    pub fn get_archived_vouch_history(
+        env: Env,
+        borrower: Address,
+        voucher: Address,
+        token: Address,
+        batch_id: u32,
+    ) -> Vec<VouchHistoryEntry> {
+        archive::get_archived_vouch_history(&env, &borrower, &voucher, &token, batch_id)
+    }
+
+    // ── IPFS Archiving ────────────────────────────────────────────────────────
+
+    /// Register an IPFS archive for a completed loan.
+    /// Called after uploading the loan archive to IPFS to store the content hash.
+    pub fn register_loan_ipfs_archive(
+        env: Env,
+        archive_id: u64,
+        ipfs_hash: String,
+    ) -> Result<(), ContractError> {
+        ipfs_archive::register_loan_ipfs_archive(&env, archive_id, ipfs_hash)
+    }
+
+    /// Retrieve the IPFS hash for an archived loan.
+    pub fn get_loan_ipfs_archive(env: Env, archive_id: u64) -> Option<IpfsArchiveReference> {
+        ipfs_archive::get_loan_ipfs_archive(&env, archive_id)
+    }
+
+    /// Register an IPFS archive for vouch history batch.
+    pub fn register_vouch_history_ipfs_archive(
+        env: Env,
+        archive_id: u64,
+        ipfs_hash: String,
+    ) -> Result<(), ContractError> {
+        ipfs_archive::register_vouch_history_ipfs_archive(&env, archive_id, ipfs_hash)
+    }
+
+    /// Retrieve the IPFS hash for archived vouch history.
+    pub fn get_vouch_history_ipfs_archive(env: Env, archive_id: u64) -> Option<IpfsArchiveReference> {
+        ipfs_archive::get_vouch_history_ipfs_archive(&env, archive_id)
+    }
+
+    /// Get the total count of IPFS archives.
+    pub fn get_ipfs_archive_count(env: Env) -> u64 {
+        ipfs_archive::get_loan_ipfs_archive_count(&env)
+    }
+
+    /// Check if an archive has been backed up to IPFS.
+    pub fn is_archive_ipfs_backed(env: Env, archive_id: u64) -> bool {
+        ipfs_archive::is_archive_ipfs_backed(&env, archive_id)
+    }
+
+    /// Verify the integrity of an archived loan against IPFS.
+    pub fn verify_loan_archive_integrity(
+        env: Env,
+        archive_id: u64,
+        expected_ipfs_hash: String,
+    ) -> Result<bool, ContractError> {
+        ipfs_archive::verify_loan_archive_integrity(&env, archive_id, expected_ipfs_hash)
+    }
+
     pub fn get_syndication(env: Env, syndication_id: u64) -> Option<LoanSyndication> {
         syndication::get_syndication(env, syndication_id)
     }
@@ -1898,5 +2026,94 @@ impl QuorumCreditContract {
         caller: Address,
     ) -> Result<Option<LoanRecord>, ContractError> {
         loan::get_loan_with_privacy(env, borrower, caller)
+    }
+
+    // ── Issue #938: Incremental Config Changes ────────────────────────────────
+
+    /// Enqueue a named config field change to be applied no earlier than `apply_after`.
+    pub fn enqueue_config_patch(
+        env: Env,
+        admin_signers: Vec<Address>,
+        field: ConfigField,
+        new_value: i128,
+        apply_after: u64,
+    ) {
+        admin::enqueue_config_patch(env, admin_signers, field, new_value, apply_after)
+    }
+
+    /// Apply the next pending config patch whose not-before timestamp has passed.
+    /// Returns `true` if a patch was applied.
+    pub fn apply_next_config_patch(env: Env) -> bool {
+        admin::apply_next_config_patch(env)
+    }
+
+    pub fn get_config_patch(env: Env, idx: u32) -> Option<ConfigPatch> {
+        admin::get_config_patch(env, idx)
+    }
+
+    pub fn get_config_patch_count(env: Env) -> u32 {
+        admin::get_config_patch_count(env)
+    }
+
+    // ── Issue #939: Storage Compaction ───────────────────────────────────────
+
+    /// Archive a completed/defaulted loan: store a compact summary, delete the full record.
+    pub fn archive_loan(
+        env: Env,
+        admin_signers: Vec<Address>,
+        loan_id: u64,
+    ) -> Result<(), ContractError> {
+        admin::archive_loan(env, admin_signers, loan_id)
+    }
+
+    pub fn get_archived_loan(env: Env, loan_id: u64) -> Option<ArchivedLoan> {
+        admin::get_archived_loan(env, loan_id)
+    }
+
+    // ── Issue #940: Vectorized Score Updates ─────────────────────────────────
+
+    /// Batch-update credit scores for multiple borrowers in a single call.
+    /// Returns `(updated_count, skipped_count)`.
+    pub fn batch_update_credit_scores(
+        env: Env,
+        admin_signers: Vec<Address>,
+        borrowers: Vec<Address>,
+    ) -> (u32, u32) {
+        admin::batch_update_credit_scores(env, admin_signers, borrowers)
+    }
+
+    // ── Issue #941: Query Pagination ─────────────────────────────────────────
+
+    /// Return a paginated slice of vouch records.
+    /// `cursor` = 0-based start index; `page_size` capped at 50.
+    pub fn get_vouches_paginated(
+        env: Env,
+        borrower: Address,
+        cursor: u32,
+        page_size: u32,
+    ) -> VouchPage {
+        admin::get_vouches_paginated(env, borrower, cursor, page_size)
+    }
+}
+
+    // ── Issue #893: Multi-Tier Admin Approval ──────────────────────────────────
+
+    pub fn set_multi_tier_thresholds(
+        env: Env,
+        admin_signers: Vec<Address>,
+        thresholds: MultiTierAdminThresholds,
+    ) {
+        admin::set_multi_tier_thresholds(env, admin_signers, thresholds)
+    }
+
+    pub fn get_multi_tier_thresholds(env: Env) -> Option<MultiTierAdminThresholds> {
+        admin::get_multi_tier_thresholds(env)
+    }
+
+    pub fn get_effective_approval_threshold(
+        env: Env,
+        operation_type: AdminOperationType,
+    ) -> u32 {
+        admin::get_effective_approval_threshold(env, operation_type)
     }
 }
