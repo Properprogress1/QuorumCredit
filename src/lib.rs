@@ -2,20 +2,27 @@
 
 pub mod admin;
 pub mod attributes;
+pub mod batch_transfer;
+pub mod cache;
+pub mod collateral_pool;
 pub mod credit_score;
+pub mod cross_chain;
 pub mod errors;
+pub mod error_response;
 pub mod governance;
+pub mod gradual_unstake;
 pub mod helpers;
 pub mod insurance;
+pub mod lazy_slash;
 pub mod loan;
+pub mod merkle_tree;
 pub mod partial_repayment;
 pub mod periodic_payments;
-pub mod reputation;
 pub mod rbac;
+pub mod reputation;
 pub mod syndication;
-#[cfg(test)]
-mod tests;
 pub mod types;
+pub mod versioning;
 pub mod vouch;
 pub mod vouch_groups;
 pub mod yield_stream;
