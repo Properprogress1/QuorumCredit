@@ -503,6 +503,58 @@ mod coverage_tests {
     }
 
     #[test]
+    fn test_is_eligible_o1_check_with_cache() {
+        let s = setup();
+        let voucher = Address::generate(&s.env);
+        let borrower = Address::generate(&s.env);
+        do_vouch(&s, &voucher, &borrower, 1_000_000);
+        
+        // First eligibility check (cache miss, computes and caches)
+        assert!(s.client.is_eligible(&borrower, &500_000));
+        
+        // Second eligibility check (cache hit, O(1))
+        assert!(s.client.is_eligible(&borrower, &500_000));
+        
+        // Third check with higher threshold still passes
+        assert!(s.client.is_eligible(&borrower, &1_000_000));
+    }
+
+    #[test]
+    fn test_cache_invalidation_on_increase_stake() {
+        let s = setup();
+        let voucher = Address::generate(&s.env);
+        let borrower = Address::generate(&s.env);
+        do_vouch(&s, &voucher, &borrower, 500_000);
+        
+        // Check eligibility (caches)
+        assert!(!s.client.is_eligible(&borrower, &1_000_000));
+        
+        // Increase stake
+        StellarAssetClient::new(&s.env, &s.token).mint(&voucher, &600_000);
+        s.client.increase_stake(&voucher, &borrower, &600_000);
+        
+        // Cache should be invalidated; next check should pass
+        assert!(s.client.is_eligible(&borrower, &1_000_000));
+    }
+
+    #[test]
+    fn test_cache_invalidation_on_decrease_stake() {
+        let s = setup();
+        let voucher = Address::generate(&s.env);
+        let borrower = Address::generate(&s.env);
+        do_vouch(&s, &voucher, &borrower, 1_000_000);
+        
+        // Check eligibility (caches)
+        assert!(s.client.is_eligible(&borrower, &1_000_000));
+        
+        // Decrease stake
+        s.client.decrease_stake(&voucher, &borrower, &400_000);
+        
+        // Cache should be invalidated; now it should fail for high threshold
+        assert!(!s.client.is_eligible(&borrower, &700_000));
+    }
+
+    #[test]
     fn test_repayment_count() {
         let s = setup();
         let voucher = Address::generate(&s.env);
