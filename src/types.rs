@@ -521,6 +521,8 @@ pub struct CollateralPool {
     pub members: Vec<Address>,
     /// Stake per member (parallel to `members`), in stroops.
     pub stakes: Vec<i128>,
+    /// Origin chain per member (parallel to `members`). `0` is the native chain.
+    pub chain_ids: Vec<u32>,
     pub token: Address,
     pub borrower: Option<Address>,
     pub active: bool,

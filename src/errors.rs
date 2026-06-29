@@ -174,4 +174,7 @@ MaxExtensionsReached = 139,
 LoanPrivacyRestricted = 140,
 /// Insurance pool is not connected to this loan.
 InsuranceNotLinked = 141,
+/// Caller is not bridge-validated for the given chain, so a cross-chain
+/// collateral pool contribution cannot be accepted.
+PoolChainNotValidated = 143,
 }

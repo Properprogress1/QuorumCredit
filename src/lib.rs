@@ -64,6 +64,8 @@ mod withdrawal_queue_test;
 #[cfg(test)]
 mod cross_chain_vouch_test;
 #[cfg(test)]
+mod collateral_pool_cross_chain_test;
+#[cfg(test)]
 mod property_stake_loan_invariants_test;
 #[cfg(test)]
 mod credit_score_test;
@@ -135,7 +137,7 @@ use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
     require_allowed_token, require_not_paused,
 };
-use crate::types::{AdminOperationType, Config, DataKey, MultiTierAdminThresholds, RateLimitConfig, DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS, DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_SLASH_BPS, DEFAULT_YIELD_BPS, DEFAULT_MIN_VOUCH_AGE_SECS};
+use crate::types::{AdminOperationType, CollateralPool, Config, DataKey, MultiTierAdminThresholds, RateLimitConfig, DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS, DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_SLASH_BPS, DEFAULT_YIELD_BPS, DEFAULT_MIN_VOUCH_AGE_SECS};
 use soroban_sdk::BytesN;
 
 #[contract]
@@ -251,6 +253,80 @@ impl QuorumCreditContract {
     /// Issue #632: Query bridge validation status.
     pub fn is_bridge_validated(env: Env, voucher: Address, chain_id: u32) -> bool {
         vouch::is_bridge_validated(env, voucher, chain_id)
+    }
+
+    /// Issue #867: Create a cross-collateral pool, seeded by the creator's stake.
+    pub fn create_collateral_pool(
+        env: Env,
+        creator: Address,
+        token: Address,
+        initial_stake: i128,
+    ) -> Result<u64, ContractError> {
+        collateral_pool::create_pool(env, creator, token, initial_stake)
+    }
+
+    /// Issue #867: Join an existing, inactive collateral pool.
+    pub fn join_collateral_pool(
+        env: Env,
+        voucher: Address,
+        pool_id: u64,
+        stake: i128,
+    ) -> Result<(), ContractError> {
+        collateral_pool::join_pool(env, voucher, pool_id, stake)
+    }
+
+    /// Issue #966: Join an existing, inactive collateral pool from another chain.
+    /// The voucher must already be bridge-validated for `chain_id` (see
+    /// `set_bridge_validated`).
+    pub fn join_collateral_pool_cross_chain(
+        env: Env,
+        voucher: Address,
+        pool_id: u64,
+        stake: i128,
+        chain_id: u32,
+    ) -> Result<(), ContractError> {
+        collateral_pool::join_pool_cross_chain(env, voucher, pool_id, stake, chain_id)
+    }
+
+    /// Issue #867: Leave an inactive collateral pool, withdrawing the caller's stake.
+    pub fn leave_collateral_pool(
+        env: Env,
+        voucher: Address,
+        pool_id: u64,
+    ) -> Result<(), ContractError> {
+        collateral_pool::leave_pool(env, voucher, pool_id)
+    }
+
+    /// Issue #867: Admin assigns a borrower to a pool, locking its collateral.
+    pub fn assign_collateral_pool_to_borrower(
+        env: Env,
+        admin_signers: Vec<Address>,
+        pool_id: u64,
+        borrower: Address,
+    ) -> Result<(), ContractError> {
+        collateral_pool::assign_pool_to_borrower(env, admin_signers, pool_id, borrower)
+    }
+
+    /// Issue #867: Read a collateral pool record.
+    pub fn get_collateral_pool(env: Env, pool_id: u64) -> Result<CollateralPool, ContractError> {
+        collateral_pool::get_pool(env, pool_id)
+    }
+
+    /// Issue #867: Total stake held in a collateral pool.
+    pub fn get_collateral_pool_total_stake(
+        env: Env,
+        pool_id: u64,
+    ) -> Result<i128, ContractError> {
+        collateral_pool::get_pool_total_stake(env, pool_id)
+    }
+
+    /// Issue #966: Total stake contributed to a pool from a specific chain.
+    pub fn get_collateral_pool_chain_stake(
+        env: Env,
+        pool_id: u64,
+        chain_id: u32,
+    ) -> Result<i128, ContractError> {
+        collateral_pool::get_pool_chain_stake(env, pool_id, chain_id)
     }
 
     /// #642: Vouch with an explicit sector label for diversification enforcement.
@@ -2094,7 +2170,6 @@ impl QuorumCreditContract {
     ) -> VouchPage {
         admin::get_vouches_paginated(env, borrower, cursor, page_size)
     }
-}
 
     // ── Issue #893: Multi-Tier Admin Approval ──────────────────────────────────
 
