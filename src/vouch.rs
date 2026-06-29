@@ -1561,17 +1561,11 @@ pub fn compute_and_store_merkle_root(env: Env, borrower: Address) -> Result<soro
         return Err(ContractError::NoVouchesForBorrower);
     }
 
-    // Build leaves from vouches: hash(voucher || stake || token)
+    // Build leaves from vouches: each leaf is 32 zero-bytes (placeholder for serialized vouch data)
+    // In production, a proper serialization of (voucher, stake, token) should be used.
     let mut leaves: Vec<soroban_sdk::Bytes> = Vec::new(&env);
-    for v in vouches.iter() {
-        let mut leaf_data = Vec::new(&env);
-        leaf_data.push_back(v.voucher.clone());
-        leaf_data.push_back(v.stake);
-        leaf_data.push_back(v.token.clone());
-        
-        // For simplicity, use direct hashing of serialized components
-        // In production, use proper serialization
-        let leaf_bytes = soroban_sdk::Bytes::from_slice(&[0u8; 32]); // Placeholder
+    for _v in vouches.iter() {
+        let leaf_bytes = soroban_sdk::Bytes::from_array(&env, &[0u8; 32]);
         leaves.push_back(leaf_bytes);
     }
 

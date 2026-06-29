@@ -202,12 +202,11 @@ pub fn approve_syndication(
 
             let mut updated_member = existing_member.clone();
             updated_member.approved = true;
-            syndication.members.set(i, updated_member);
-
-            // Update member index
+            // Store updated member before moving into Vec
             env.storage()
                 .persistent()
-                .set(&DataKey::SyndicationMember(syndication_id, member), &updated_member);
+                .set(&DataKey::SyndicationMember(syndication_id, member.clone()), &updated_member);
+            syndication.members.set(i, updated_member);
 
             member_found = true;
             syndication.approval_count += 1;

@@ -172,7 +172,7 @@ impl QuorumCreditContract {
                 admin_threshold,
                 admin_whitelist: Vec::new(&env),
                 admin_blacklist: Vec::new(&env),
-                token,
+                token: token.clone(),
                 allowed_tokens: Vec::new(&env),
                 yield_bps: DEFAULT_YIELD_BPS,
                 slash_bps: DEFAULT_SLASH_BPS,
@@ -1326,7 +1326,7 @@ impl QuorumCreditContract {
         env.storage().instance().set(&DataKey::Config, &cfg);
     }
 
-    pub fn add_allowed_token(env: Env, admin_signers: Vec<Address>, token: Address) {
+    pub fn add_allowed_token(env: Env, admin_signers: Vec<Address>, token: Address) -> Result<(), ContractError> {
         admin::add_allowed_token(env, admin_signers, token)
     }
 

@@ -132,8 +132,8 @@ pub fn calculate_credit_score(
     let voucher_count: u32 = env
         .storage()
         .instance()
-        .get(&DataKey::VoucherHistory(borrower.clone()))
-        .map(|history| history.len() as u32)
+        .get::<DataKey, soroban_sdk::Vec<crate::types::VouchHistoryEntry>>(&DataKey::VoucherHistory(borrower.clone()))
+        .map(|history| history.len())
         .unwrap_or(0);
 
     // Calculate component scores
@@ -177,7 +177,7 @@ pub fn update_credit_score(env: Env, borrower: Address) -> Result<(), ContractEr
     let credit_score = calculate_credit_score(&env, &borrower)?;
     env.storage()
         .persistent()
-        .set(&DataKey::CreditScore(borrower), &credit_score);
+        .set(&DataKey::CreditScore(borrower.clone()), &credit_score);
 
     env.events().publish(
         (symbol_short!("credit"), symbol_short!("update")),
