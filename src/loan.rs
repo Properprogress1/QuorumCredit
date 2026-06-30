@@ -107,7 +107,23 @@ fn vouch_yield_bps_uncached(env: &Env, vouch: &VouchRecord, borrower: &Address, 
         })
         .unwrap_or(0);
 
-    (base_bps + age_bonus + rep_bonus + voucher_rep_bonus + reliability_bonus).max(0)
+    // ── Diversification bonus ─────────────────────────────────────────────────
+    // +50 bps per additional unique borrower, max 500 bps (5%)
+    let history: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VoucherHistory(vouch.voucher.clone()))
+        .unwrap_or(Vec::new(env));
+    let mut unique_borrowers = Vec::new(env);
+    for b in history.iter() {
+        if !unique_borrowers.iter().any(|ub| ub == &b) {
+            unique_borrowers.push_back(b.clone());
+        }
+    }
+    let unique_count = unique_borrowers.len() as i128;
+    let diversification_bonus = ((unique_count - 1) * 50).min(500);
+
+    (base_bps + age_bonus + rep_bonus + voucher_rep_bonus + reliability_bonus + diversification_bonus).max(0)
 }
 
 /// Calculate dynamic yield (legacy — used for backward-compat; prefer vouch_yield_bps per vouch).
