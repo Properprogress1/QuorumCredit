@@ -511,6 +511,17 @@ pub enum DataKey {
     CascadingDefaultRecord(u64),
     /// Waterfall distribution configuration for a borrower
     WaterfallConfig(Address),
+    // ── zk-SNARK Confidentiality ───────────────────────────────────────────────
+    /// Verifying key hash for zk-SNARK circuits by proof type
+    ZkVerifyingKey(u32),
+    /// Confidential commitment for a vouch: (voucher, borrower) → ConfidentialCommitment
+    VouchCommitment(Address, Address),
+    /// Confidential commitment for a loan: loan_id → ConfidentialCommitment
+    LoanCommitment(u64),
+    /// zk-SNARK proof record for audit trail: proof_id → ZkProofRecord
+    ZkProofRecord(u64),
+    /// Counter for zk-SNARK proof records
+    ZkProofCounter,
 }
 
 /// Issue #867: Shared collateral pool backed by multiple vouchers.
@@ -854,6 +865,72 @@ pub struct CreditScore {
     pub voucher_count: u32,
     /// Average repayment time (in seconds before deadline, negative if late)
     pub avg_repayment_time: i64,
+}
+
+// ── zk-SNARK Confidentiality Types ─────────────────────────────────────────────
+
+/// A zk-SNARK proof for confidential operations
+#[contracttype]
+#[derive(Clone)]
+pub struct ZkProof {
+    /// Proof points (compressed representation)
+    pub proof_bytes: soroban_sdk::Bytes,
+    /// Public inputs for the proof
+    pub public_inputs: soroban_sdk::Vec<soroban_sdk::BytesN<32>>,
+    /// Proof type identifier
+    pub proof_type: u32,
+}
+
+/// A commitment to a confidential value using hash-based commitment
+#[contracttype]
+#[derive(Clone)]
+pub struct ConfidentialCommitment {
+    /// The commitment value (hash of blinded amount)
+    pub commitment: soroban_sdk::BytesN<32>,
+    /// The blinding factor (revealed only to trusted parties)
+    pub blinding: soroban_sdk::BytesN<32>,
+}
+
+/// Public parameters for the zk-SNARK system
+#[contracttype]
+#[derive(Clone)]
+pub struct ZkPublicParams {
+    /// Verifying key hash (for on-chain verification)
+    pub vk_hash: soroban_sdk::BytesN<32>,
+    /// Circuit identifier
+    pub circuit_id: u32,
+}
+
+/// Audit record for a zk-SNARK proof
+#[contracttype]
+#[derive(Clone)]
+pub struct ZkProofRecord {
+    /// Unique proof ID
+    pub proof_id: u64,
+    /// The proof that was verified
+    pub proof: ZkProof,
+    /// Operation type (vouch, loan_request, repayment)
+    pub operation_type: u32,
+    /// Address that submitted the proof
+    pub submitter: Address,
+    /// Whether verification succeeded
+    pub verified: bool,
+    /// Ledger timestamp when proof was submitted
+    pub submitted_at: u64,
+}
+
+/// Proof types for different operations
+pub const PROOF_TYPE_VOUCH: u32 = 1;
+pub const PROOF_TYPE_LOAN_REQUEST: u32 = 2;
+pub const PROOF_TYPE_REPAYMENT: u32 = 3;
+
+/// Error for invalid proof type
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ZkError {
+    InvalidProofType,
+    ProofVerificationFailed,
+    InvalidCommitment,
 }
 
 /// Reputation NFT badge record for borrowers reaching Excellent tier.
